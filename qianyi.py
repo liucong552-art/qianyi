@@ -425,7 +425,8 @@ def rebase_bandwidth(rec, origin_wall, now, boot_now, boot_id):
 
 
 @contextlib.contextmanager
-def locks(paths=LOCKS, readonly=False):
+def locks(paths=None, readonly=False):
+    paths = LOCKS if paths is None else paths
     fds = []
     try:
         for path in paths:
@@ -1265,34 +1266,58 @@ def target_stage(snap):
 def recover_ready(sid, snap):
     """Only a never-opened target may rebuild lost kernel objects after reboot."""
     s=session(sid)
-    need(s['phase'] == 'READY', '只有尚未开放的目标可以恢复准备阶段')
+    need(s['role'] == 'target' and s['phase'] == 'READY', '只有尚未开放的目标可以恢复准备阶段')
     if s.get('ready_boot') == boot_id():
         return
     pause_workers(sid)
-    hold_nodes(sid,snap['nodes'])
+    hold_nodes(sid,[n for n in snap['nodes'] if int(n['meta']['EXPIRE_EPOCH']) > time.time()])
     with locks():
         stop_bandwidth_worker()
         sync_fence()
         for n in snap['nodes']:
-            systemctl('stop',n['meta']['TAG']+'.service')
+            # Native expiry cleanup may already have removed the unit. A failed
+            # stop is acceptable only if state and sockets both prove it stopped.
+            unit=n['meta']['TAG']+'.service'
+            systemctl('stop',unit,check=False)
+            need(active(unit) in ('inactive','failed'), '准备恢复时目标服务没有停止')
         need(not (listening() & {int(n['meta']['PORT']) for n in snap['nodes']}), '准备恢复时目标仍有监听')
         # Read current persistent balances (including a reset already applied
         # before the reboot), never overwrite them with the source's old values.
-        current=copy.deepcopy(snap['nodes'])
-        for n in current:
-            paths=node_paths(n['meta']['TAG'],n['meta']['PORT'])
-            for key in ('config','url','unit'):
-                need(regular(paths[key]).decode() == n[key], '重启后准备配置被修改')
-            for key in ('meta','quota','iplimit'):
-                raw=regular(paths[key],key == 'meta' or n.get(key) is not None)
-                n[key]=metadata(raw) if raw else None
-            validate_node(n)
+        current=current_nodes(snap['nodes'])
         restore_quota_ip(current,due=True)
         apply_restrictions(current)
-        install_bandwidth(snap)
+        ports={n['meta']['PORT'] for n in current}
+        install_bandwidth(dict(snap,bandwidth={p:r for p,r in snap['bandwidth'].items() if p in ports}))
         verify_protection(current)
         check_preserved(s['protected'])
         update_session(sid,ready_boot=boot_id())
+
+
+def current_nodes(nodes):
+    """Read under native locks; expired nodes may have been removed by native GC.
+
+    Never materialize missing files from the snapshot. Its identity/expiry is a
+    constraint, but live quota/IP metadata always comes from this host.
+    """
+    now=time.time(); listeners=listening(); current=[]
+    for original in nodes:
+        m=original['meta']; unit=m['TAG']+'.service'
+        if int(m['EXPIRE_EPOCH']) <= now:
+            need(active(unit) in ('inactive','failed') and int(m['PORT']) not in listeners,
+                 f'{m["TAG"]} 已到期但服务或端口仍活动；保持隔离并检查原生到期清理')
+            continue
+        paths=node_paths(m['TAG'],m['PORT'])
+        actual=copy.deepcopy(original)
+        for key in ('config','url','unit'):
+            need(regular(paths[key]).decode() == original[key], f'{m["TAG"]} 认证配置或链接发生变化')
+        for key in ('meta','quota','iplimit'):
+            raw=regular(paths[key],key == 'meta')
+            actual[key]=metadata(raw) if raw is not None else None
+        for key in ('TAG','PORT','CREATE_EPOCH','EXPIRE_EPOCH','DURATION_SECONDS'):
+            need(actual['meta'].get(key) == m[key], f'{m["TAG"]} 身份或有效期发生变化')
+        validate_node(actual)
+        current.append(actual)
+    return current
 
 
 def start_target_nodes(snap):
@@ -1323,25 +1348,15 @@ def verify_target(sid):
     need(s['role'] == 'target' and s['phase'] in ('READY','OPEN'), '目标未进入可验证阶段')
     snap=read_json(session_path(sid)/'snapshot.json')
     check_preserved(s['protected'])
-    current=[]
-    for n in snap['nodes']:
-        m=n['meta']; paths=node_paths(m['TAG'],m['PORT'])
-        if int(m['EXPIRE_EPOCH']) <= int(time.time()):
-            continue
-        for k in ('config','url','unit'):
-            need(regular(paths[k]).decode() == n[k], f'{m["TAG"]} 认证配置或链接发生变化')
-        actual=copy.deepcopy(n)
-        actual['meta']=metadata(regular(paths['meta']))
-        for k in ('quota','iplimit'):
-            raw=regular(paths[k],False)
-            actual[k]=metadata(raw) if raw else None
-        validate_node(actual)
-        check_wg(m)
-        need(active(m['TAG']+'.service') == 'active', f'{m["TAG"]} 服务未运行')
-        current.append(actual)
-    listeners=listening()
-    need(all(int(n['meta']['PORT']) in listeners for n in current), '目标有节点尚未监听')
     with locks():
+        # Hold temp/quota/IP through reads and validation so GC/reset cannot
+        # delete half a node or change its quota generation during inspection.
+        current=current_nodes(snap['nodes'])
+        for n in current:
+            m=n['meta']; check_wg(m)
+            need(active(m['TAG']+'.service') == 'active', f'{m["TAG"]} 服务未运行')
+        listeners=listening()
+        need(all(int(n['meta']['PORT']) in listeners for n in current), '目标有节点尚未监听')
         verify_protection(current)
         restrictions=extract_restrictions(nft_rows(),{int(n['meta']['PORT']) for n in current})
         for n in current:
@@ -1435,23 +1450,37 @@ def source_abort(sid):
     # Complete settlement first. No source listener is released without proof.
     snap=freeze(sid)
     with locks():
-        restore_quota_ip(snap['nodes'],due=True)
-        apply_restrictions(snap['nodes'])
-        verify_protection(snap['nodes'])
+        live=[n for n in snap['nodes'] if int(n['meta']['EXPIRE_EPOCH']) > time.time()]
+        restore_quota_ip(live,due=True)
+        apply_restrictions(live)
+        verify_protection(live)
     update_session(sid,phase='RESUMED')
     finish_source_resume(sid)
 
 
 def finish_source_resume(sid):
     s=session(sid)
-    need(s['phase'] == 'RESUMED', '源机尚未取得安全恢复状态')
+    need(s['role'] == 'source' and s['phase'] == 'RESUMED', '源机尚未取得安全恢复状态')
     # This phase may already have served new traffic: never replay the snapshot.
-    verify_protection(s['nodes'])
+    with locks():
+        current=current_nodes(s['nodes'])
+        verify_protection(current)
     release_nodes(s['nodes'])
-    for n in s['nodes']:
+    # Gate acquires quota/IP locks. Never wait for systemd start under those locks.
+    for n in current:
         if int(n['meta']['EXPIRE_EPOCH']) > time.time() and not n['disabled']:
             systemctl('start',n['meta']['TAG']+'.service')
-    sync_fence()
+    with locks():
+        # Expiry may have happened during startup; re-read before releasing the
+        # fence, without restoring counters or restrictions from old state.
+        current=current_nodes(s['nodes'])
+        verify_protection(current)
+        listeners=listening()
+        for n in current:
+            if not n['disabled']:
+                need(active(n['meta']['TAG']+'.service') == 'active' and int(n['meta']['PORT']) in listeners,
+                     '源恢复节点尚未运行或监听')
+        sync_fence()
     refresh_subscription()
     resume_workers(sid)
 

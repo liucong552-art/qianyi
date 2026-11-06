@@ -17,7 +17,7 @@
 - [freedom.go](https://github.com/XTLS/Xray-core/blob/v26.10.31/proxy/freedom/freedom.go) 的 `getDefaultFinalRule` 对 VLESS 默认应用 private IP 拦截。
 - [geodata/consts.go](https://github.com/XTLS/Xray-core/blob/v26.10.31/common/geodata/consts.go) 定义被拦截的回环、私网及特殊用途地址范围。
 
-本地诊断不等同于原 URL/NAT 全套烟测；阶段 1 提交时完整 CI 尚待运行。未修改生产节点配置校验，也没有删除失败断言。`show` 恢复为 false，避免输出握手派生材料。
+本地诊断不等同于原 URL/NAT 全套烟测；随后阶段 1 提交 `f1ac316` 的完整 CI [42236445140](https://github.com/liucong552-art/qianyi/actions/runs/42236445140) 两个 job 均通过，已从日志核对所有原断言完成。未修改生产节点配置校验，也没有删除失败断言。`show` 恢复为 false，避免输出握手派生材料。
 
 ## 各层测试分别证明什么
 
@@ -30,3 +30,9 @@
 | [VPS_ACCEPTANCE.md](VPS_ACCEPTANCE.md) | 真实双机全流程验收清单 | 尚未执行，不能填通过 |
 
 涉及 nft/tc/hosts/IP 的脚本只能在 workflow 指定的一次性容器执行。不能在用户生产 VPS 上直接运行。
+
+## READY / RESUMED 回归（阶段 2）
+
+本地共 73 项 unittest 通过。`tests/test_recovery.py` 使用真实私有临时文件及真实 flock，模拟 systemd/监听/nft；14 项新增用例覆盖：部分或全部节点已到期且文件已删、到期边界相等、未到期节点六类文件缺失、stop 失败且仍 active、到期节点残留监听、期限遭修改、READY 重置落盘后中断重试、RESUMED 最新 70 GiB 持久用量加 3 GiB 实时计数保持、实时计数缺失拒绝、启动时跨越到期、读取和验证持锁、systemd start 不持原生锁、verify 到期计数。
+
+这些测试不启动真实 systemd、SSH、WireGuard；完整系统恢复仍按 VPS_ACCEPTANCE.md 验收。阶段 2 的完整 CI 待提交后确认。

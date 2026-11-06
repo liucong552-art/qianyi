@@ -339,6 +339,9 @@ class DurableTests(unittest.TestCase):
             for name in ['verify_protection','release_nodes','systemctl','sync_fence','resume_workers','refresh_subscription']:
                 stack.enter_context(patch.object(q,name))
             stack.enter_context(patch.object(q,'locks',return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(q,'current_nodes',return_value=[node()]))
+            stack.enter_context(patch.object(q,'active',return_value='active'))
+            stack.enter_context(patch.object(q,'listening',return_value={40000}))
             restore=stack.enter_context(patch.object(q,'restore_quota_ip'))
             remote=stack.enter_context(patch.object(q,'remote'))
             q.worker(SID)
@@ -461,6 +464,7 @@ class OrderingTests(unittest.TestCase):
             stack.enter_context(patch.object(q,'node_paths',return_value=paths))
             stack.enter_context(patch.object(q,'locks',return_value=contextlib.nullcontext()))
             stack.enter_context(patch.object(q,'listening',return_value=set()))
+            stack.enter_context(patch.object(q,'active',return_value='inactive'))
             order=[]
             for name in ('pause_workers','hold_nodes','stop_bandwidth_worker','sync_fence','systemctl',
                          'apply_restrictions','install_bandwidth','verify_protection','check_preserved'):

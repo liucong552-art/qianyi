@@ -14,9 +14,16 @@
 - 串行 OpenSSL `s_server` 无法同时处理 Xray 的 ALPN/CCS 后台探测和实际握手。改为逐连接线程 TLS 1.3 目标后，日志出现 `hs.readClientFinished() err: <nil>`、`uConn.Verified: true`，证明原合成 Reality 凭据可认证。
 - 随后发现第二层失败：v26.10.31 freedom 默认阻断 VLESS 的私网/回环目标，日志为 `blocked target ... blackholing connection`。源码依据和复现过程见 docs/TESTING.md。
 - 完整烟测改用隔离 netns 内本地绑定的全局地址类别 /32，并断言路由为 local/lo；不修改原节点 freedom/NAT 出站策略，不访问外部 HTTP。保持错误公钥拒绝、多轮、三个独立密钥等原断言。
-- 新增真实 TLS socket 并发回归，本次 59 项 unittest 及 Python 编译通过；完整 Debian 13 / nft / portbw / Reality CI **等待本阶段提交后的运行结果**，尚不能记为通过。真实 VPS 仍未执行。
+- 新增真实 TLS socket 并发回归，本次 59 项 unittest 及 Python 编译通过；提交 `f1ac316` 的完整 CI 已通过：[42236445140](https://github.com/liucong552-art/qianyi/actions/runs/42236445140)。unit 与 Debian 13 job 均 success，日志确认原生 nft/portbw 及原 URL Reality 多轮/错误公钥测试均完成。真实 VPS 仍未执行。
 
-下一阶段：修复 READY 到期文件缺失、RESUMED 当前状态与持锁验证边界，补故障回归及操作文档。旧失败证据 docs/CI_LAST_FAILURE.txt 保留。
+### 阶段 2：READY / RESUMED 到期与锁边界
+
+- READY 重启恢复跳过已到期节点的文件、quota/IP 和限速重建；原生 GC 删除 unit 时不因 stop 返回失败直接中断，但必须确认服务停止、无残留监听。所有未到期节点仍要求完整当前文件，禁止从快照补回缺失凭据/余额。
+- 新增 current_nodes：在原生锁内读取当前元数据，核对原身份/期限与 JSON/URL/unit，沿用当前持久余额及 IP 配置。已到期节点仅在无活动服务/监听时排除；不延长期限。
+- RESUMED 前后两次持 temp→quota→IP→portbw→blacklist 锁读取与验证；中间释放锁再调用 systemd start，避免父进程等待门禁子进程。收尾不恢复旧配额、限制或限速，不重新依赖 SSH；丢失实时计数则拒绝而非清零。
+- verify_target 的读取与验证进入同一原生锁边界。撤销源时不再为到期节点恢复旧防护文件。
+- 本地 **73 项 unittest 通过**，Python 编译、diff whitespace 检查通过。新增 14 项到期/故障/真实 flock 回归；systemd/nft 仍为夹具，不能称为系统集成验收。
+- 本阶段完整 CI 待提交后确认；下一阶段复核代码、更新 README/HANDOFF/恢复说明及待真实 VPS 清单。旧失败证据 docs/CI_LAST_FAILURE.txt 保留。
 
 ## 之前的开发记录（历史，非当前验收结论）
 
