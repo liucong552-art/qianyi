@@ -1,0 +1,27 @@
+name: migration-tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests and standalone build
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile qianyi.py tools/build_profile.py
+          python3 qianyi.py build /tmp/qianyi-standalone.py
+          python3 /tmp/qianyi-standalone.py --help
+  debian13-nft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native nftables in isolated Debian 13 container
+        run: |
+          docker run --rm --cap-add NET_ADMIN \
+            -e QIANYI_DISPOSABLE_NETNS=1 -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$PWD:/src:ro" -w /src debian:13-slim \
+            sh -ec 'apt-get update -qq; apt-get install -y -qq python3 openssl nftables iproute2; python3 tests/nft_kernel.py'

@@ -30,3 +30,5 @@
 ## 验证边界
 
 本地单元/仿真测试不能证明两台真实 Debian 13 的 nftables、tc、systemd、SSH 与 Reality 外网连接已通过。交付文档必须单列真实 VPS 验收项。
+
+JSON 格式另核对 [Debian 13 libnftables-json(5)](https://manpages.debian.org/trixie/libnftables1/libnftables-json.5.en.html)：named quota 的 bytes/used/inv、named counter 引用、集合 timeout 单位为秒（不是内核 API 的毫秒）、动态 set 操作、th 端口及 concat 表达式。内核真实输出兼容性仍需 VPS 验收。

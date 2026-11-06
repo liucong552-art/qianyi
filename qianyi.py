@@ -93,7 +93,7 @@ def regular(path, required=True):
         need(not required, f'缺少文件：{p}')
         return None
     s = p.lstat()
-    need(stat.S_ISREG(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022,
+    need(stat.S_ISREG(s.st_mode) and s.st_uid == os.geteuid() and not s.st_mode & 0o022,
          f'文件不是 root 管理的普通文件或可被其他用户修改：{p}')
     return p.read_bytes()
 
@@ -209,8 +209,9 @@ def validate_node(node):
     link = urllib.parse.urlsplit(node['url'].strip())
     query = urllib.parse.parse_qs(link.query, strict_parsing=True)
     need(all(len(v) == 1 for v in query.values()), '链接参数重复')
+    published=m.get('SERVER_ADDR',m['PUBLIC_DOMAIN']) if m.get('LANDING') == 'nat' else m['PUBLIC_DOMAIN']
     need(link.scheme == 'vless' and link.username == m['UUID'] and link.port == port and
-         link.hostname == m['PUBLIC_DOMAIN'].lower(), '原链接域名/端口/UUID 与节点不一致')
+         link.hostname == published.lower(), '原链接域名/端口/UUID 与节点不一致')
     need(not re.fullmatch(r'[0-9.]+', link.hostname or '') and re.fullmatch(r'[A-Za-z0-9.-]+', link.hostname or ''), '需要业务域名链接')
     for k, v in {'pbk':m['PBK'], 'sid':m['SHORT_ID'], 'sni':m['REALITY_SNI'],
                  'type':'tcp', 'security':'reality', 'encryption':'none', 'flow':'xtls-rprx-vision'}.items():
@@ -275,9 +276,29 @@ def quota_live(q, rows):
     p = q['PORT']; table = [x for x in rows if next(iter(x.values()), {}).get('table') == 'vr_pq']
     counters = {x['counter']['name']:x['counter'] for x in table if 'counter' in x}
     quotas = {x['quota']['name']:x['quota'] for x in table if 'quota' in x}
-    rules = {x['rule'].get('comment'):x['rule'] for x in table if 'rule' in x}
+    rule_list = [x['rule'] for x in table if 'rule' in x]
+    rules = {x.get('comment'):x for x in rule_list}
     drops = ['vr-pq-drop-'+d+'-'+p for d in ('in','out')]
     need(all(k in rules for k in drops), f'{p} 缺失配额阻断规则')
+    for direction,chain,field in [('in','pq_input','dport'),('out','pq_output','sport')]:
+        match={'match':{'op':'==','left':{'payload':{'protocol':'tcp','field':field}},'right':int(p)}}
+        for kind in (('drop','count') if q['LIMIT_BYTES'] != '0' else ('drop',)):
+            comment=f'vr-pq-{kind}-{direction}-{p}'
+            selected=[r for r in rule_list if r.get('comment') == comment]
+            need(len(selected) == 1 and selected[0].get('chain') == chain, '配额规则重复或链不匹配')
+            expr=copy.deepcopy(selected[0]['expr'])
+            for e in expr:
+                for key in ('counter','quota'):
+                    if isinstance(e.get(key),dict) and set(e[key]) == {'name'}:
+                        e[key]=e[key]['name']
+            expected=[match]
+            if kind == 'count':
+                expected += [{'counter':f'vr_pq_{direction}_{p}'}]
+            else:
+                if q['LIMIT_BYTES'] != '0':
+                    expected += [{'quota':'vr_pq_q_'+p}]
+                expected += [{'drop':None}]
+            need(expr == expected, '配额规则表达式与已审计版本不一致')
     if q['LIMIT_BYTES'] == '0':
         need(all(rules[k]['expr'][-1] == {'drop':None} for k in drops), '耗尽规则异常')
         need(not any('quota' in e for k in drops for e in rules[k]['expr']), '耗尽配额仍是条件规则')
@@ -295,12 +316,57 @@ def quota_live(q, rows):
     return max(a, b)
 
 
+def check_native_tables(rows, nodes):
+    """Detect unowned rules even inside a familiar table, before rebuilding it."""
+    for entry in rows:
+        kind=next(iter(entry)); r=entry[kind]
+        if r.get('table') not in ('vr_pq','vr_iplimit'):
+            continue
+        table=r['table']
+        if kind == 'chain':
+            expected={'pq_input':'input','pq_output':'output'} if table == 'vr_pq' else {'il_input':'input'}
+            priority=0 if table == 'vr_pq' else -10
+            need(r.get('name') in expected and r.get('hook') == expected[r['name']] and r.get('prio') == priority
+                 and r.get('type') == 'filter' and r.get('policy') == 'accept', '原生防护基链被修改')
+        elif kind == 'rule':
+            pattern=r'vr-pq-(drop|count)-(in|out)-([1-9][0-9]*)' if table == 'vr_pq' else r'vr-il-(family|refresh|claim|drop)-([1-9][0-9]*)'
+            match=re.fullmatch(pattern,r.get('comment',''))
+            need(match is not None, '原生防护表存在未知规则，不能直接重建')
+            p=int(match.groups()[-1])
+            payloads=[e['match'] for e in r.get('expr',[]) if isinstance(e.get('match'),dict)
+                      and isinstance(e['match'].get('left',{}).get('payload'),dict)
+                      and e['match']['left']['payload'].get('field') in ('sport','dport')]
+            need(len(payloads) == 1 and payloads[0].get('right') == p and payloads[0].get('op') == '==', '防护规则注释/端口不一致')
+        elif kind == 'counter':
+            need(table == 'vr_pq' and re.fullmatch(r'vr_pq_(in|out)_[1-9][0-9]*',r.get('name','')), '未知防护计数对象')
+        elif kind == 'quota':
+            need(table == 'vr_pq' and re.fullmatch(r'vr_pq_q_[1-9][0-9]*',r.get('name','')), '未知 quota 对象')
+        elif kind == 'set':
+            need(table == 'vr_iplimit' and re.fullmatch(r'vr_il[46]_[1-9][0-9]*',r.get('name','')), '未知 IP 集合')
+        else:
+            raise Error('原生防护表含无法迁移的自定义对象')
+    sets={e['set']['name']:e['set'] for e in rows if 'set' in e and e['set'].get('table') == 'vr_iplimit'}
+    for n in nodes:
+        m=n['meta']; p=m['PORT']
+        related=[e['rule'] for e in rows if 'rule' in e and e['rule'].get('table') == 'vr_iplimit'
+                 and re.search('-'+p+'$',e['rule'].get('comment',''))]
+        expected={'family','refresh','claim','drop'} if n.get('iplimit') else {'family'}
+        need(len(related) == len(expected) and {r['comment'].split('-')[2] for r in related} == expected, 'IP 防护规则不完整或重复')
+        if n.get('iplimit'):
+            st=sets.get('vr_il4_'+p,{})
+            need(st.get('type') == 'ipv4_addr' and st.get('size') == int(m['IP_LIMIT'])
+                 and st.get('timeout') == int(m['IP_STICKY_SECONDS'])
+                 and set(st.get('flags',[])) == {'timeout','dynamic'}, 'IP 限制内核容量/超时与配置不符')
+
+
 def load_module(path, name):
     raw = regular(path)
     need(digest(raw) == PROFILE['files'][path], f'未支持的已安装版本：{path}')
     module = types.ModuleType(name)
     module.__file__ = path
     exec(compile(raw, path, 'exec'), module.__dict__)
+    if hasattr(module,'Error'):
+        module.Error=type(name+'Error',(Error,),{})
     return module
 
 
@@ -396,6 +462,10 @@ def check_profile(nat=False, bw=False):
     for unit in TIMERS+WORKERS:
         drop = systemctl('show', '-p', 'DropInPaths', '--value', unit).split()
         need(all(p == f'{UNIT}/{unit}.d/90-qianyi-hold.conf' for p in drop), f'未知服务覆盖：{unit}')
+    for unit in TIMERS+['vless-managed-restore.service','vless-managed-shutdown-save.service']:
+        need(systemctl('is-enabled',unit,check=False) == 'enabled', f'{unit} 未启用，不能保证周期/重启规则一致')
+    for unit in TIMERS:
+        need(active(unit) == 'active', f'{unit} 未运行，先恢复原管理环境再迁移')
     need(systemctl('is-active','xray.service') == 'active', '目标或源 443 主服务未正常运行')
 
 
@@ -404,9 +474,13 @@ def environment():
     osr = metadata(regular('/usr/lib/os-release' if Path('/etc/os-release').is_symlink() else '/etc/os-release'))
     need(osr.get('ID','').strip('"') == 'debian' and osr.get('VERSION_ID','').strip('"') == '13', '仅支持 Debian 13')
     need(Path('/run/systemd/system').is_dir(), '需要 systemd')
-    for cmd in ['python3','bash','nft','ip','ss','systemctl','openssl','flock','timeout','ssh']:
+    for cmd in ['python3','bash','nft','ip','ss','systemctl','systemd-analyze','timedatectl','openssl','flock','timeout','ssh']:
         need(shutil.which(cmd), f'缺少依赖：{cmd}')
     need(Path('/usr/local/bin/xray').is_file(), '未安装 Xray')
+    main_config=json.loads(regular('/usr/local/etc/xray/config.json'))
+    main_meta=metadata(regular(VR+'/main/main.env'))
+    need(main_meta.get('PORT') == '443' and len(main_config['inbounds']) == 1 and
+         main_config['inbounds'][0]['port'] == 443, '主节点环境不是预期的独立 443')
     need(output(['timedatectl','show','-p','NTPSynchronized','--value']) == 'yes', '系统时钟未同步')
     return {'machine':machine_id(), 'boot':boot_id(), 'time':time.time(),
             'xray':output(['/usr/local/bin/xray','version']).splitlines()[0],
@@ -470,11 +544,26 @@ def extract_restrictions(rows, ports):
     for p in ports:
         t = f'pause_vless_{p}'
         if t in tables:
-            text = output(['nft','-nn','list','table','inet',t])
             rules = [x['rule'] for x in rows if 'rule' in x and x['rule'].get('table') == t]
-            need(len(rules) == 2 and f'iifname != "lo" tcp dport {p} reject with tcp reset' in text and
-                 f'iifname != "lo" udp dport {p} drop' in text and 'hook input priority -20;' in text,
-                 f'{p} 端口暂停规则不是支持的版本')
+            chains=[x['chain'] for x in rows if 'chain' in x and x['chain'].get('table') == t]
+            need(len(chains) == 1 and chains[0].get('name') == 'input' and chains[0].get('hook') == 'input'
+                 and chains[0].get('prio') == -20 and chains[0].get('policy') == 'accept' and len(rules) == 2,
+                 f'{p} 端口暂停基链不是支持的版本')
+            found=set()
+            for r in rules:
+                expr=r['expr']
+                need(r.get('chain') == 'input' and len(expr) == 3 and
+                     expr[0] == {'match':{'op':'!=','left':{'meta':{'key':'iifname'}},'right':'lo'}}, '暂停规则条件异常')
+                match=expr[1].get('match',{}); payload=match.get('left',{}).get('payload',{})
+                proto=payload.get('protocol')
+                need(match.get('op') == '==' and match.get('right') == p and payload.get('field') == 'dport'
+                     and proto in ('tcp','udp'), '暂停规则端口/协议异常')
+                if proto == 'tcp':
+                    need(expr[2].get('reject',{}).get('type') == 'tcp reset', '暂停 TCP 动作异常')
+                else:
+                    need(expr[2] == {'drop':None}, '暂停 UDP 动作异常')
+                found.add(proto)
+            need(found == {'tcp','udp'}, '暂停规则协议覆盖不足')
             result[p]['paused'] = True
     for x in rows:
         r = x.get('rule',{})
@@ -487,11 +576,16 @@ def extract_restrictions(rows, ports):
             source = expr[0].get('match',{})
             expected = str(ipaddress.IPv4Network(network).network_address)
             right = source.get('right')
-            valid_addr = right == expected if network.endswith('/32') else right == {'prefix':{'addr':expected,'len':int(network.split('/')[1])}}
+            valid_addr = right == {'prefix':{'addr':expected,'len':int(network.split('/')[1])}} or (network.endswith('/32') and right == expected)
             need(source.get('left') == {'payload':{'protocol':'ip','field':'saddr'}} and source.get('op') == '==' and valid_addr,
                  'CIDR 黑名单源地址/注释不一致')
-            need(expr[1] == {'match':{'op':'==','left':{'meta':{'key':'l4proto'}},'right':{'set':['tcp','udp']}}}
-                 and expr[2] == {'match':{'op':'==','left':{'payload':{'base':'transport header','offset':2,'len':2}},'right':p}},
+            proto=expr[1].get('match',{})
+            port_match=expr[2].get('match',{})
+            need(proto.get('op') in ('==','in') and proto.get('left') == {'meta':{'key':'l4proto'}}
+                 and set(map(str,proto.get('right',{}).get('set',[]))) in ({'tcp','udp'},{'6','17'})
+                 and port_match.get('op') == '==' and port_match.get('right') == p
+                 and port_match.get('left') in ({'payload':{'protocol':'th','field':'dport'}},
+                                                {'payload':{'base':'transport header','offset':2,'len':2}}),
                  'CIDR 黑名单协议/端口不匹配')
             if p in result:
                 result[p]['bans'].append(network)
@@ -500,8 +594,34 @@ def extract_restrictions(rows, ports):
         rules = [x['rule'] for x in rows if 'rule' in x and x['rule'].get('table') == 'jsh_ipban']
         need(len(sets) == 1 and sets[0]['name'] == 'banned' and sets[0]['type'] == ['ipv4_addr','inet_service'], '未知旧黑名单集合')
         # Validate the legacy concatenation lookup, not just a trusted-looking table name.
-        need(rules and all(r.get('chain') == 'pre' and r['expr'][-1] == {'drop':None}
-                          and '@banned' in json.dumps(r) for r in rules), '旧黑名单规则无法识别')
+        need(len(rules) in (1,2), '旧黑名单规则数量异常')
+        covered=set()
+        for r in rules:
+            expr=[e for e in r['expr'] if 'counter' not in e]
+            need(r.get('chain') == 'pre' and expr[-1] == {'drop':None}, '旧黑名单动作异常')
+            expr=expr[:-1]
+            protos=None
+            if expr and expr[0].get('match',{}).get('left') == {'meta':{'key':'l4proto'}}:
+                proto=expr.pop(0)['match']
+                values=proto.get('right',{})
+                values=values.get('set',[]) if isinstance(values,dict) else [values]
+                need(proto.get('op') in ('==','in'), '旧黑名单协议操作异常')
+                protos={str(v) for v in values}
+                protos={{'6':'tcp','17':'udp'}.get(v,v) for v in protos}
+                need(protos and protos <= {'tcp','udp'}, '旧黑名单协议非法')
+            need(len(expr) == 1, '旧黑名单含额外条件')
+            match=expr[0].get('match',{}); concat=match.get('left',{}).get('concat',[])
+            need(match.get('op') in ('==','in') and match.get('right') == '@banned' and len(concat) == 2
+                 and concat[0] == {'payload':{'protocol':'ip','field':'saddr'}}, '旧黑名单匹配表达式异常')
+            payload=concat[1].get('payload',{})
+            need(payload.get('field') == 'dport' and payload.get('protocol') in ('th','tcp','udp'), '旧黑名单端口表达式异常')
+            if payload['protocol'] == 'th':
+                need(protos == {'tcp','udp'}, '旧黑名单没有覆盖 TCP/UDP')
+                covered |= protos
+            else:
+                need(protos is None or protos == {payload['protocol']}, '旧黑名单协议矛盾')
+                covered.add(payload['protocol'])
+        need(covered == {'tcp','udp'}, '旧黑名单协议覆盖不足')
         for e in sets[0].get('elem',[]):
             if 'elem' in e:
                 need(set(e['elem']) == {'val'}, '不支持带期限的自定义黑名单')
@@ -584,12 +704,18 @@ def bandwidth(nodes, rows, target=False):
         return {}
     mod = load_module(path, '_qianyi_portbw')
     config = mod.cfg(); records = mod.records()
+    for unit in OPTIONAL:
+        need(systemctl('is-enabled',unit,check=False) == 'enabled', f'{unit} 未启用，无法保证重启限速')
+        drops=systemctl('show','-p','DropInPaths','--value',unit).split()
+        need(all(x == f'{UNIT}/{unit}.d/90-qianyi-hold.conf' for x in drops), '存在未知 portbw systemd 覆盖')
     mod.validate_base(mod.nft_snapshot())
     result = {}
     for p in ports:
         if target:
             need(p not in records and not mod.owned(rows,p), f'{p} 目标存在限速残留')
             if config['tc_enabled']:
+                kinds={r.get('kind') for r in mod.tc_qdiscs(config['iface'])}
+                need('ingress' not in kinds or 'clsact' in kinds, '目标有冲突的 ingress qdisc，不能附加限速')
                 for d in ('up','down'):
                     need(not mod.tc_action_exists(mod.tc_police_index(p,d)), f'{p} 目标存在 tc action 冲突')
             continue
@@ -646,11 +772,17 @@ def probe(role, manifest=None):
                 if n['quota']:
                     quota_live(n['quota'],rows)
         if role == 'source':
+            check_native_tables(rows,nodes)
+            for n in nodes:
+                name='vr_il_state ' if n.get('iplimit') else 'vr_il_family_guard_state '
+                need(library(name+n['meta']['PORT']) == 'active', '源 IP 防护没有生效')
             restrictions = extract_restrictions(rows,{int(n['meta']['PORT']) for n in nodes})
             for n in nodes:
                 n['restrictions'] = restrictions[int(n['meta']['PORT'])]
                 n['restrictions']['paused'] |= n['disabled']
-            return {'info':info,'nodes':nodes,'bandwidth':bandwidth(nodes,rows), 'protected':protected_fingerprints()}
+            bw=bandwidth(nodes,rows)
+            info['time']=time.time()
+            return {'info':info,'nodes':nodes,'bandwidth':bw, 'protected':protected_fingerprints()}
         return {'info':info, 'protected':protected_fingerprints()}
 
 
@@ -663,7 +795,7 @@ def session(sid):
     return read_json(session_path(sid)/'state.json')
 
 
-def update_session(sid, **fields):
+def update_session(sid, /, **fields):
     path = session_path(sid)/'state.json'
     obj = read_json(path) if path.exists() else {}
     obj.update(fields, updated=int(time.time()))
@@ -693,6 +825,10 @@ def install_program(data=None):
     old = regular(PROGRAM,False)
     need(old is None or old == data, '已安装其他版本 qianyi；请先完成当前事务，不自动覆盖')
     atomic(PROGRAM,data,0o700)
+    origin_path=STATE/'boot-origins.json'
+    origins=read_json(origin_path) if origin_path.exists() else {}
+    origins[boot_id()]=time.time()-boottime()
+    save(origin_path,origins)
     text = f'''[Unit]
 Description=Restore migration fences and imported node restrictions
 After=local-fs.target nftables.service jsh-cidrban.service jsh-ipban.service
@@ -831,6 +967,7 @@ def restore_quota_ip(nodes, due=False):
 
 def verify_protection(nodes):
     rows=nft_rows()
+    check_native_tables(rows,nodes)
     for n in nodes:
         p=n['meta']['PORT']
         if n.get('quota'):
@@ -902,7 +1039,7 @@ def install_bandwidth(snapshot):
 
 def freeze(sid):
     s=session(sid); path=session_path(sid)
-    if (path/'snapshot.json').exists():
+    if (path/'snapshot.json').exists() and s['phase'] != 'FREEZING':
         need(s['phase'] in ('SEALED','TRANSFERRING','OPEN_UNCERTAIN'), '旧源快照不能重新使用')
         return read_json(path/'snapshot.json')
     if s['phase'] == 'PREPARED':
@@ -915,8 +1052,8 @@ def freeze(sid):
         s=session(sid)
     need(s['phase'] == 'FREEZING', '源事务状态不允许冻结')
     pause_workers(sid)
-    hold_nodes(sid,s['nodes'])
     with locks():
+        hold_nodes(sid,s['nodes'])
         stop_bandwidth_worker()
         sync_fence()
         need({p.stem for p in Path(VR+'/temp').glob('*.env')} == {n['meta']['TAG'] for n in s['nodes']},
@@ -947,6 +1084,7 @@ def freeze(sid):
                     n[k]=metadata(raw) if raw else None
                 validate_node(n)
             rows=nft_rows(); now=int(time.time())
+            check_native_tables(rows,nodes)
             restrictions=extract_restrictions(rows,{int(n['meta']['PORT']) for n in nodes})
             for n in nodes:
                 if n['quota']:
@@ -980,13 +1118,22 @@ def validate_snapshot(snap, s):
 
 def target_prepare(request):
     sid=request['sid']; path=session_path(sid)
-    need(not (path/'state.json').exists(), '目标已存在该事务')
-    for p in (STATE/'sessions').glob('*/state.json'):
-        need(read_json(p).get('phase') not in ('PREPARED','STAGING','READY'), '目标有未完成事务')
     manifest=request['manifest']
+    if (path/'state.json').exists():
+        old=session(sid)
+        need(old['role'] == 'target' and old['phase'] == 'PREPARED' and
+             old['source_machine'] == manifest['info']['machine'], '目标事务不能重新准备')
+    for p in (STATE/'sessions').glob('*/state.json'):
+        if p.parent.name == sid:
+            continue
+        need(read_json(p).get('phase') not in ('PREPARED','STAGING','READY'), '目标有未完成事务')
     checked=probe('target',manifest)
     update_session(sid,sid=sid,role='target',phase='PREPARED',source_machine=manifest['info']['machine'],
                    target_machine=machine_id(),nodes=manifest['nodes'],protected=checked['protected'])
+    for n in manifest['nodes']:
+        cfg=path/'checked-configs'/(n['meta']['TAG']+'.json')
+        atomic(cfg,n['config'].encode())
+        output(['/usr/local/bin/xray','run','-test','-config',str(cfg)])
     return {'sid':sid,'machine':machine_id(),'phase':'PREPARED'}
 
 
@@ -1014,6 +1161,7 @@ def target_stage(snap):
     need(s['role'] == 'target' and s['phase'] in ('PREPARED','STAGING','READY'), '目标已开放、撤销或处于未知状态；禁止旧快照覆盖')
     validate_snapshot(snap,s)
     if s['phase'] == 'READY':
+        start_target_nodes(snap)
         verify_target(sid)
         return {'phase':'READY','snapshot_sha':s['snapshot_sha']}
     if s['phase'] == 'PREPARED':
@@ -1038,6 +1186,7 @@ def target_stage(snap):
                     record=apply_due(n[k],int(time.time())) if k == 'quota' else n[k]
                     import_write(sid,paths[k],env_bytes(record))
             output(['/usr/local/bin/xray','run','-test','-config',paths['config']])
+            output(['systemd-analyze','verify',paths['unit']])
         restore_quota_ip(snap['nodes'],due=True)
         apply_restrictions(snap['nodes'])
         install_bandwidth(snap)
@@ -1045,6 +1194,12 @@ def target_stage(snap):
         check_preserved(s['protected'])
         update_session(sid,phase='READY')
     # The gate takes quota/IP locks itself; never start systemd nodes under them.
+    start_target_nodes(snap)
+    verify_target(sid)
+    return {'phase':'READY','snapshot_sha':digest(encoded(snap))}
+
+
+def start_target_nodes(snap):
     release_nodes(snap['nodes'])
     systemctl('start','qianyi-boot.service')
     for n in snap['nodes']:
@@ -1053,8 +1208,6 @@ def target_stage(snap):
         unit=n['meta']['TAG']+'.service'
         systemctl('enable',unit)
         systemctl('start',unit)
-    verify_target(sid)
-    return {'phase':'READY','snapshot_sha':digest(encoded(snap))}
 
 
 def verify_target(sid):
@@ -1137,6 +1290,9 @@ def target_abort(sid):
          '目标可能已承载新流量，禁止回到旧余额；必须以目标最新状态重新迁移')
     if s['phase'] == 'ABORTED':
         return {'phase':'ABORTED','machine':machine_id()}
+    if s['phase'] == 'PREPARED':
+        update_session(sid,phase='ABORTED')
+        return {'phase':'ABORTED','machine':machine_id()}
     update_session(sid,phase='ABORTING')
     pause_workers(sid)
     hold_nodes(sid,s['nodes'])
@@ -1157,11 +1313,11 @@ def target_abort(sid):
 
 def source_abort(sid):
     s=session(sid)
-    need(s['role'] == 'source' and s['phase'] in ('PREPARED','FREEZING','SEALED','TRANSFERRING'),
+    need(s['role'] == 'source' and s['phase'] in ('PREPARING','PREPARED','FREEZING','SEALED','TRANSFERRING'),
          '已开放或结果不确定时禁止旧余额回退；先查目标状态')
-    result=remote(s['ssh'],'abort-target',{'sid':sid})
+    result=remote(s['ssh'],'abort-target',{'sid':sid,'source_machine':s['source_machine'],'target_machine':s['target_machine']})
     need(result['phase'] == 'ABORTED' and result['machine'] == s['target_machine'], '没有取得目标撤销确认')
-    if s['phase'] == 'PREPARED':
+    if s['phase'] in ('PREPARING','PREPARED'):
         update_session(sid,phase='ABORTED')
         return
     # Complete settlement first. No source listener is released without proof.
@@ -1287,6 +1443,10 @@ def agent_action(action,request):
         if action == 'verify':
             return verify_target(request['sid'])
         if action == 'abort-target':
+            if not (session_path(request['sid'])/'state.json').exists():
+                need(request.get('target_machine') == machine_id(), '撤销准备的机器身份不符')
+                update_session(request['sid'],sid=request['sid'],role='target',phase='ABORTED',nodes=[],
+                               source_machine=request['source_machine'],target_machine=machine_id())
             return target_abort(request['sid'])
     raise Error('未知远端动作')
 
@@ -1307,10 +1467,15 @@ def prepare(settings):
     install_program()
     program=program_bytes()
     remote(settings,'install',{'program':base64.b64encode(program).decode(),'sha':digest(program)},bootstrap=True)
-    result=remote(settings,'prepare',{'sid':sid,'manifest':source})
-    need(result['machine'] == target['info']['machine'], '准备后目标身份发生变化')
-    update_session(sid,sid=sid,role='source',phase='PREPARED',ssh=settings,source_machine=machine_id(),
+    update_session(sid,sid=sid,role='source',phase='PREPARING',ssh=settings,source_machine=machine_id(),
                    target_machine=target['info']['machine'],nodes=source['nodes'])
+    try:
+        result=remote(settings,'prepare',{'sid':sid,'manifest':source})
+        need(result['machine'] == target['info']['machine'], '准备后目标身份发生变化')
+        update_session(sid,phase='PREPARED')
+    except Error as exc:
+        update_session(sid,last_error=str(exc))
+        raise Error(f'准备未确认，事务已保存：{sid}。修复后 resume，或 abort 取消。') from exc
     print(f'准备完成：{sid}；{report["nodes"]} 个节点。尚未停止源节点。')
     print(f'开始交接：python3 {PROGRAM} cutover {sid}')
     return sid
@@ -1321,7 +1486,16 @@ def worker(sid):
         with locks(['/run/qianyi-transaction.lock']):
             s=session(sid)
             need(s['role'] == 'source', '必须在当前源机执行')
+            if s['phase'] == 'PREPARING':
+                fresh=probe('source')
+                result=remote(s['ssh'],'prepare',{'sid':sid,'manifest':fresh})
+                need(result['machine'] == s['target_machine'], '准备恢复时目标身份改变')
+                update_session(sid,phase='PREPARED')
+                s=session(sid)
             if s['phase'] == 'RETIRED':
+                sync_fence()
+                resume_workers(sid)
+                update_session(sid,last_error='')
                 return
             if s['phase'] == 'OPEN_UNCERTAIN':
                 status=remote(s['ssh'],'status',{'sid':sid})
@@ -1352,7 +1526,7 @@ def worker(sid):
 
 def launch(sid):
     s=session(sid)
-    need(s['role'] == 'source' and s['phase'] not in ('ABORTED','RESUMED','RETIRED'), '该事务不允许交接/重试')
+    need(s['role'] == 'source' and s['phase'] not in ('ABORTED','RESUMED'), '该事务不允许交接/重试')
     control=Path('/run/qianyi')
     control.mkdir(mode=0o700,exist_ok=True)
     need(control.stat().st_uid == 0 and not control.stat().st_mode & 0o077 and not control.is_symlink(), 'SSH 控制目录权限不安全')
