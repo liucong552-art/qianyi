@@ -411,6 +411,10 @@ def rebase_bandwidth(rec, origin_wall, now, boot_now, boot_id):
         return rec
     rt = rec['runtime']; rt['boot_id'] = boot_id; rt['checked_at'] = None
     for d, s in rt['dirs'].items():
+        if s['phase'] == 'hold' and s.get('last_busy_at') is not None:
+            # Same falling-edge settlement as native finalize_hold_activity:
+            # a confirmed busy sample may extend beyond the durable checkpoint.
+            s['until']=max(s['until'],s['last_busy_at']+rec['auto']['hold'])
         # CLOCK_BOOTTIME values from another machine are never reused directly.
         if s['until'] is not None:
             s['until'] = boot_now + max(0, origin_wall+s['until']-now)
@@ -738,6 +742,7 @@ def bandwidth(nodes, rows, target=False):
     mod = load_module(path, '_qianyi_portbw')
     config = mod.cfg(); records = mod.records()
     for unit in OPTIONAL:
+        need(regular(f'{UNIT}/{unit}').decode() == mod.units()[unit], f'{unit} 不是已审计的限速服务')
         need(systemctl('is-enabled',unit,check=False) == 'enabled', f'{unit} 未启用，无法保证重启限速')
         drops=systemctl('show','-p','DropInPaths','--value',unit).split()
         need(all(x == f'{UNIT}/{unit}.d/90-qianyi-hold.conf' for x in drops), '存在未知 portbw systemd 覆盖')
@@ -745,7 +750,7 @@ def bandwidth(nodes, rows, target=False):
     result = {}
     for p in ports:
         if target:
-            need(p not in records and not mod.owned(rows,p), f'{p} 目标存在限速残留')
+            need(p not in records and not any(mod.owned(rows,p)), f'{p} 目标存在限速残留')
             if config['tc_enabled']:
                 kinds={r.get('kind') for r in mod.tc_qdiscs(config['iface'])}
                 need('ingress' not in kinds or 'clsact' in kinds, '目标有冲突的 ingress qdisc，不能附加限速')
@@ -798,6 +803,10 @@ def probe(role, manifest=None):
             need(manifest['info']['xray'] == info['xray'], '两机 Xray 版本不同')
             need(abs(manifest['info']['time']-info['time']) < 30, '两机时钟或预检请求时间差超过 30 秒')
             need(not manifest.get('bandwidth') or has_bw, '目标缺少对应版本 portbw，请先安装')
+            if manifest.get('bandwidth'):
+                mod=load_module('/usr/local/lib/portbw/portbw.py','_qianyi_portbw')
+                need(mod.cfg()['tc_enabled'] or not any(r.get('down') or 'auto' in r for r in manifest['bandwidth'].values()),
+                     '目标未启用 tc，不能接续下载/自动限速；不自动改网卡配置')
         for n in nodes:
             validate_node(n)
             check_wg(n['meta'])
@@ -1118,7 +1127,7 @@ def freeze(sid):
                     n[k]=metadata(raw) if raw else None
                 validate_node(n)
             rows=nft_rows(); now=int(time.time())
-            check_native_tables(rows,nodes)
+            check_native_tables(rows,nodes,require_owned=True)
             restrictions=extract_restrictions(rows,{int(n['meta']['PORT']) for n in nodes})
             for n in nodes:
                 if n['quota']:

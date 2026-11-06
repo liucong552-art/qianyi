@@ -201,6 +201,13 @@ class DataTests(unittest.TestCase):
         self.assertEqual(b['runtime']['dirs']['up']['until'],7)
         self.assertEqual(b['up'],2250000)  # upstream monitor releases normally after audit
 
+    def test_last_confirmed_busy_sample_extends_existing_hold(self):
+        a=auto_record();a['runtime']['dirs']['up']['last_busy_at']=190.
+        b=q.rebase_bandwidth(a,1000,1100,7,'c'*36)
+        self.assertEqual(b['runtime']['dirs']['up']['until'],217.)
+        self.assertIsNone(b['runtime']['dirs']['up']['last_busy_at'])
+        self.assertEqual(b['up'],a['up'])
+
     def test_ip_timeout_and_config_are_kept_not_dynamic_occupancy(self):
         n=node();restored=json.loads(q.encoded(n))
         self.assertEqual(restored['iplimit']['IP_LIMIT'],'2')

@@ -10,6 +10,8 @@
 
 接续检查点：已修复 gate 等待 watchdog 的 temp.lock、RESUMED 收尾不必要的 SSH 依赖，补齐原生 IP 防护完整表达式校验、孤立防护对象检查及订阅刷新。53 项本地测试通过；新的 CI 结果待确认。真实 nft JSON 已固化为 tests/fixtures/nft-iplimit-debian13.json，不再依赖会过期的 CI 日志。
 
+继续检查点：提交 2c09d21 的两项 CI 均通过（运行 42231122138）。后续修正了 portbw.owned 返回二元组导致空目标误报的问题，以及滚动限速 last_busy_at 截止时间结算，补查 portbw unit 与目标 tc 能力；54 项单元测试通过，新增真实 portbw/nft/tc 集成测试待 CI 确认。
+
 - 本项目直接在指定仓库 main 分阶段提交；最近提交历史是实际持久检查点。
 - 已完成源码审计，固定上游提交 3e1972393cd9e6f097b27b76f919a649def61ae4，详见 docs/SOURCE_AUDIT.md。
 - 已实现第一版独立 Python 程序：只读预检、SSH、systemd 后台交接、冻结/结算/快照、目标恢复、不可重放状态、重试/撤销/归档、逐节点凭据及限制校验。
