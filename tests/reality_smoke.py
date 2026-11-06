@@ -75,13 +75,17 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
            '-subj','/CN=tls.example.com','-keyout',root/'tls.key','-out',root/'tls.crt'])
     lifetime.enter_context(process(['openssl','s_server','-accept',f'127.0.0.1:{tls_port}',
                                     '-tls1_3','-cert',str(root/'tls.crt'),'-key',str(root/'tls.key'),
-                                    '-alpn','h2,http/1.1','-www'],tls_port,root/'tls.log'))
+                                    '-groups','X25519','-alpn','h2,http/1.1','-www'],tls_port,root/'tls.log'))
 
     def fixture(port,key,nat=False):
         n=node(port,nat=nat,key=key);m=n['meta'];cfg=json.loads(n['config'])
         cfg['log']['loglevel']='debug'  # synthetic CI fixtures only
         m.update(REALITY_DEST=f'127.0.0.1:{tls_port}',REALITY_SNI='tls.example.com')
-        cfg['inbounds'][0]['streamSettings']['realitySettings'].update(dest=m['REALITY_DEST'],serverNames=[m['REALITY_SNI']])
+        reality=cfg['inbounds'][0]['streamSettings']['realitySettings']
+        reality.update(dest=m['REALITY_DEST'],serverNames=[m['REALITY_SNI']],show=True)
+        # These keys are deterministic public fixtures, never user credentials.
+        derived=q.output([XRAY,'x25519','-i',reality['privateKey']])
+        assert m['PBK'] in derived, 'OpenSSL and Xray disagree on fixture public key'
         n['config']=json.dumps(cfg)
         old=urllib.parse.urlsplit(n['url'].strip());query=urllib.parse.parse_qs(old.query)
         query['sni']=[m['REALITY_SNI']]
@@ -114,7 +118,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
                 'settings':{'vnext':[{'address':link.hostname,'port':link.port,'users':[{
                     'id':link.username,'encryption':get('encryption'),'flow':get('flow')}]}]},
                 'streamSettings':{'network':get('type'),'security':get('security'),'realitySettings':{
-                    'serverName':get('sni'),'fingerprint':get('fp'),'publicKey':wrong_key or get('pbk'),
+                    'show':True,'serverName':get('sni'),'fingerprint':get('fp'),'publicKey':wrong_key or get('pbk'),
                     'shortId':get('sid')}}}]}
         path=root/'client.json';q.save(path,config)
         with process([XRAY,'run','-config',str(path)],port,root/'client.log'):
