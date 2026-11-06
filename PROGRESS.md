@@ -6,7 +6,9 @@
 
 ## 当前状态（2026-11-06）
 
-**已按用户要求暂停，等待下次继续。当前版本不能直接用于生产：最后复查发现下述 gate 锁顺序问题，尚未修复。**
+**用户已要求继续完成。正在进行最后修复与验证；尚未完成真实 VPS 验收。**
+
+接续检查点：已修复 gate 等待 watchdog 的 temp.lock、RESUMED 收尾不必要的 SSH 依赖，补齐原生 IP 防护完整表达式校验、孤立防护对象检查及订阅刷新。53 项本地测试通过；新的 CI 结果待确认。真实 nft JSON 已固化为 tests/fixtures/nft-iplimit-debian13.json，不再依赖会过期的 CI 日志。
 
 - 本项目直接在指定仓库 main 分阶段提交；最近提交历史是实际持久检查点。
 - 已完成源码审计，固定上游提交 3e1972393cd9e6f097b27b76f919a649def61ae4，详见 docs/SOURCE_AUDIT.md。
@@ -26,10 +28,10 @@
 
 ## 待完成
 
-1. **优先修复 gate 死锁风险。** qianyi.py 的 gate() 当前使用 `locks(readonly=True)`，包含 temp.lock。真实上游 vless_managed_watchdog.sh 在持有 temp.lock 时调用 `systemctl restart`；ExecStartPre gate 再等待这把锁，会使重启失败，长期可能触发原 watchdog 清理。gate 应只取得检查防护必要的 quota/IP/portbw 等锁，不能再等父管理器持有的 temp.lock；核实原 watchdog 启动边界的其他锁状态，并增加回归测试。该修复尚未开始。
+1. gate 锁修复已完成，使用实际文件锁的回归测试通过；继续核对 CI 与完整 systemd 行为。
 2. 继续复查 READY/RESUMED 的中断恢复；RESUMED 可能已经产生新流量，重试只能收尾，不能重新恢复旧快照。launch 对 RESUMED 仍会要求目标 SSH，可改为本机收尾；不要误把它当成新的迁移。
-3. check_native_tables 对 IP 防护目前核对注释、端口、基链、集合容量/timeout/flags，但还未完整核对 refresh/claim/family/drop 的全部表达式。最新 CI 日志有 `native_ip_expressions=` 的真实 nft JSON（全部是合成测试资料）；可据此补强严格校验，防止未知条件被重建丢失。
-4. 目标聚合订阅 `/root/vless_temp_subscription*.txt` 当前由原 watchdog 下一轮刷新；可在节点启动后调用已审计 vless_temp_sub.sh 及时刷新，注意它需要 temp 锁，不得在持锁进程中另起 systemd 等待。原用户链接已原文保留，此处是原管理审计完整性。
+3. IP 防护已补齐完整表达式核对；后续继续检查黑名单与重启保护边界。
+4. 已在目标启动后及源退休/撤销恢复后调用原生订阅刷新，继承持锁标志，避免另起 systemd 子任务造成锁等待。
 5. 最后一轮实现审查、更新 README/恢复说明及测试记录。README 状态仍应标为待真实 VPS 验收。
 6. 按 docs/VPS_ACCEPTANCE.md 在两台测试 VPS 完成 Reality 实连、WG、systemd 启停/重启、掉线/重试、反向多轮验收；此项需要真实环境，未执行。
 

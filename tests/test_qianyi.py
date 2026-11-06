@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import itertools
 import unittest
 from unittest.mock import patch
 import urllib.parse
@@ -84,6 +85,15 @@ def auto_record():
                     'trigger_bp':10000,'after':45,'hold':120,'cooldown':30},
             'runtime':{'boot_id':'b'*36,'checked_at':100.,'dirs':{
                 'up':direction('hold',200.),'down':direction('cooldown',150.)}}}
+
+
+def ip_kernel():
+    actual=json.loads((ROOT/'tests/fixtures/nft-iplimit-debian13.json').read_text())
+    rows=[{'chain':{'family':'inet','table':'vr_iplimit','name':'il_input','hook':'input','prio':-10,'type':'filter','policy':'accept'}},
+          {'set':{'table':'vr_iplimit','name':'vr_il4_40000','type':'ipv4_addr','size':2,'timeout':120,'flags':['dynamic','timeout']}}]
+    for part,expr in zip(actual['order'],actual['expressions']):
+        rows.append({'rule':{'table':'vr_iplimit','chain':'il_input','comment':f'vr-il-{part}-40000','expr':expr}})
+    return rows
 
 
 class DataTests(unittest.TestCase):
@@ -319,13 +329,32 @@ class DurableTests(unittest.TestCase):
     def test_resumed_source_retry_never_replays_balance(self):
         self.init(phase='RESUMED')
         with contextlib.ExitStack() as stack:
-            for name in ['verify_protection','release_nodes','systemctl','sync_fence','resume_workers']:
+            for name in ['verify_protection','release_nodes','systemctl','sync_fence','resume_workers','refresh_subscription']:
                 stack.enter_context(patch.object(q,name))
             stack.enter_context(patch.object(q,'locks',return_value=contextlib.nullcontext()))
             restore=stack.enter_context(patch.object(q,'restore_quota_ip'))
             remote=stack.enter_context(patch.object(q,'remote'))
             q.worker(SID)
             restore.assert_not_called();remote.assert_not_called()
+
+    def test_resumed_launch_finishes_without_ssh(self):
+        self.init(phase='RESUMED')
+        with patch.object(q,'active',return_value='inactive'),patch.object(q,'worker') as worker,patch.object(q,'ssh_args',side_effect=AssertionError('SSH not needed')),contextlib.redirect_stdout(None):
+            q.launch(SID)
+            worker.assert_called_once_with(SID)
+
+    def test_gate_can_run_while_native_watchdog_holds_temp_lock(self):
+        n=node();self.init(role='target',phase='OPEN')
+        base=Path(self.tmp.name)/'vr'
+        q.save(q.STATE/'owners.json',{n['meta']['TAG']:SID})
+        for key,directory,filename in [('meta','temp',n['meta']['TAG']),('quota','quota','40000'),('iplimit','iplimit','40000')]:
+            q.atomic(base/directory/(filename+'.env'),q.env_bytes(n[key]))
+        paths=[str(Path(self.tmp.name)/'locks'/name) for name in ['temp','quota','iplimit','portbw']]
+        for p in paths:q.atomic(p,b'')
+        with q.locks(paths[:1]):
+            with patch.object(q,'VR',str(base)),patch.object(q,'LOCKS',paths),patch.object(q,'check_wg'),patch.object(q,'verify_protection') as verify,patch.object(q.time,'monotonic',side_effect=itertools.count(0,100)):
+                q.gate(n['meta']['TAG'])
+                verify.assert_called_once()
 
 
 class RestrictionTests(unittest.TestCase):
@@ -360,14 +389,25 @@ class RestrictionTests(unittest.TestCase):
 
     def test_native_ip_timeout_and_priority(self):
         n=node();p=40000
-        rows=[{'chain':{'family':'inet','table':'vr_iplimit','name':'il_input','hook':'input','prio':-10,'type':'filter','policy':'accept'}},
-              {'set':{'table':'vr_iplimit','name':'vr_il4_40000','type':'ipv4_addr','size':2,'timeout':120,'flags':['dynamic','timeout']}}]
-        for part in ['family','refresh','claim','drop']:
-            rows.append({'rule':{'table':'vr_iplimit','chain':'il_input','comment':f'vr-il-{part}-{p}',
-                                'expr':[{'match':{'op':'==','left':{'payload':{'protocol':'tcp','field':'dport'}},'right':p}}]}})
+        rows=ip_kernel()
         q.check_native_tables(rows,[n])
         rows[1]['set']['timeout']=60
         with self.assertRaises(q.Error):q.check_native_tables(rows,[n])
+
+    def test_forged_ip_rule_cannot_bypass_exact_semantics(self):
+        for kind in ('family','refresh','claim','drop'):
+            rows=ip_kernel()
+            rule=next(r['rule'] for r in rows if r.get('rule',{}).get('comment') == f'vr-il-{kind}-40000')
+            rule['expr'][-1]={'accept':None} if kind in ('family','drop') else {'drop':None}
+            with self.assertRaises(q.Error):q.check_native_tables(rows,[node()])
+        rows=ip_kernel();rows[3]['rule']['expr'][2]['set']['elem']['elem']['timeout']=1
+        with self.assertRaises(q.Error):q.check_native_tables(rows,[node()])
+
+    def test_pristine_target_rejects_orphan_native_objects(self):
+        with self.assertRaises(q.Error):q.check_native_tables(ip_kernel(),[],require_owned=True)
+
+    def test_single_node_gate_allows_other_managed_ports(self):
+        q.check_native_tables(ip_kernel()+kernel(node(40001)['quota']),[node()])
 
     def test_legacy_ipban_pair_is_converted_to_cidr(self):
         rows=[{'table':{'name':'jsh_ipban','family':'inet'}},

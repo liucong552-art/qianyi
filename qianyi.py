@@ -316,13 +316,14 @@ def quota_live(q, rows):
     return max(a, b)
 
 
-def check_native_tables(rows, nodes):
+def check_native_tables(rows, nodes, require_owned=False):
     """Detect unowned rules even inside a familiar table, before rebuilding it."""
     for entry in rows:
         kind=next(iter(entry)); r=entry[kind]
         if r.get('table') not in ('vr_pq','vr_iplimit'):
             continue
         table=r['table']
+        need(r.get('family','inet') == 'inet', '原生防护表位于未知地址族')
         if kind == 'chain':
             expected={'pq_input':'input','pq_output':'output'} if table == 'vr_pq' else {'il_input':'input'}
             priority=0 if table == 'vr_pq' else -10
@@ -333,6 +334,7 @@ def check_native_tables(rows, nodes):
             match=re.fullmatch(pattern,r.get('comment',''))
             need(match is not None, '原生防护表存在未知规则，不能直接重建')
             p=int(match.groups()[-1])
+            need(not require_owned or p in {443} | {int(n['meta']['PORT']) for n in nodes}, '存在无元数据归属的防护规则')
             payloads=[e['match'] for e in r.get('expr',[]) if isinstance(e.get('match'),dict)
                       and isinstance(e['match'].get('left',{}).get('payload'),dict)
                       and e['match']['left']['payload'].get('field') in ('sport','dport')]
@@ -345,6 +347,8 @@ def check_native_tables(rows, nodes):
             need(table == 'vr_iplimit' and re.fullmatch(r'vr_il[46]_[1-9][0-9]*',r.get('name','')), '未知 IP 集合')
         else:
             raise Error('原生防护表含无法迁移的自定义对象')
+        if require_owned and kind in ('counter','quota','set'):
+            need(int(r['name'].rsplit('_',1)[1]) in {443} | {int(n['meta']['PORT']) for n in nodes}, '存在无归属的内核防护对象')
     sets={e['set']['name']:e['set'] for e in rows if 'set' in e and e['set'].get('table') == 'vr_iplimit'}
     for n in nodes:
         m=n['meta']; p=m['PORT']
@@ -352,6 +356,35 @@ def check_native_tables(rows, nodes):
                  and re.search('-'+p+'$',e['rule'].get('comment',''))]
         expected={'family','refresh','claim','drop'} if n.get('iplimit') else {'family'}
         need(len(related) == len(expected) and {r['comment'].split('-')[2] for r in related} == expected, 'IP 防护规则不完整或重复')
+        port_match={'match':{'op':'==','left':{'payload':{'protocol':'tcp','field':'dport'}},'right':int(p)}}
+        family=lambda number: {'match':{'op':'==','left':{'meta':{'key':'nfproto'}},'right':number}}
+        address={'payload':{'protocol':'ip','field':'saddr'}}
+        set_name='@vr_il4_'+p
+        for rule in related:
+            part=rule['comment'].split('-')[2]
+            expr=copy.deepcopy(rule['expr'])
+            # nft -n emits NFPROTO_IPV4=2, NFPROTO_IPV6=10. Accept the equivalent
+            # symbolic values too, but never discard extra match conditions.
+            for e in expr:
+                mt=e.get('match',{})
+                if mt.get('left') == {'meta':{'key':'nfproto'}}:
+                    mt['right']={'ipv4':2,'ipv6':10}.get(mt.get('right'),mt.get('right'))
+            if part in ('family','drop'):
+                wanted=[family(10 if part == 'family' else 2),port_match,{'drop':None}]
+            else:
+                wanted=[port_match]
+                if part == 'refresh':
+                    wanted.append({'match':{'op':'==','left':address,'right':set_name}})
+                wanted += [{'set':{'op':'update' if part == 'refresh' else 'add',
+                                   'elem':{'elem':{'val':address,'timeout':int(m['IP_STICKY_SECONDS'])}},
+                                   'set':set_name}},{'accept':None}]
+                # The IPv4 payload itself implies nfproto; libnftables normally
+                # removes that redundant prefix when printing kernel rules.
+                if expr[:1] == [family(2)]:
+                    expr=expr[1:]
+            need(rule.get('chain') == 'il_input' and expr == wanted, 'IP 防护表达式与已审计规则不一致')
+        actual_sets={name for name in sets if name.rsplit('_',1)[-1] == p}
+        need(actual_sets == ({'vr_il4_'+p} if n.get('iplimit') else set()), '节点存在多余或缺失 IP 集合')
         if n.get('iplimit'):
             st=sets.get('vr_il4_'+p,{})
             need(st.get('type') == 'ipv4_addr' and st.get('size') == int(m['IP_LIMIT'])
@@ -732,6 +765,7 @@ def bandwidth(nodes, rows, target=False):
 
 def check_empty(nodes, rows):
     need(not discover(), '目标存在临时用户节点，拒绝覆盖')
+    check_native_tables(rows,[],require_owned=True)  # only main-port 443 guards may remain
     ports = {int(n['meta']['PORT']) for n in nodes}
     need(not (listening() & ports), '目标待迁入端口已被监听（含 TCP/UDP）')
     for n in nodes:
@@ -772,7 +806,7 @@ def probe(role, manifest=None):
                 if n['quota']:
                     quota_live(n['quota'],rows)
         if role == 'source':
-            check_native_tables(rows,nodes)
+            check_native_tables(rows,nodes,require_owned=True)
             for n in nodes:
                 name='vr_il_state ' if n.get('iplimit') else 'vr_il_family_guard_state '
                 need(library(name+n['meta']['PORT']) == 'active', '源 IP 防护没有生效')
@@ -1257,6 +1291,14 @@ def start_target_nodes(snap):
         while int(n['meta']['PORT']) not in listening():
             need(active(unit) == 'active' and time.monotonic() < deadline, '目标节点未在期限内开始监听')
             time.sleep(.1)
+    refresh_subscription()
+
+
+def refresh_subscription():
+    # Direct execution inherits our held lock flags; never use a systemd child
+    # that would wait for its parent's temp.lock.
+    with locks():
+        library('/usr/local/sbin/vless_temp_sub.sh >/dev/null')
 
 
 def verify_target(sid):
@@ -1333,6 +1375,7 @@ def retire_source(sid):
         update_session(sid,phase='RETIRED')
         sync_fence()
     systemctl('daemon-reload')
+    refresh_subscription()
     resume_workers(sid)
 
 
@@ -1392,6 +1435,7 @@ def finish_source_resume(sid):
         if int(n['meta']['EXPIRE_EPOCH']) > time.time() and not n['disabled']:
             systemctl('start',n['meta']['TAG']+'.service')
     sync_fence()
+    refresh_subscription()
     resume_workers(sid)
 
 
@@ -1405,7 +1449,10 @@ def gate(tag):
     need(int(m['EXPIRE_EPOCH']) > time.time(), '节点已到期')
     check_wg(m)  # no wg guard/healthcheck/network reconfiguration
     p=m['PORT']
-    with locks(readonly=True):
+    # The native watchdog holds temp.lock across systemctl restart. Its quota
+    # and IP locks are released before restart; waiting on temp.lock here would
+    # deadlock ExecStartPre against the watchdog waiting for this service.
+    with locks(LOCKS[1:],readonly=True):
         n={'meta':m,'quota':metadata(regular(f'{VR}/quota/{p}.env')) if m.get('PQ_LIMIT_BYTES') else None,
            'iplimit':metadata(regular(f'{VR}/iplimit/{p}.env')) if int(m['IP_LIMIT']) else None}
         verify_protection([n])
@@ -1592,6 +1639,14 @@ def worker(sid):
 def launch(sid):
     s=session(sid)
     need(s['role'] == 'source' and s['phase'] != 'ABORTED', '该事务不允许交接/重试')
+    unit='qianyi-transfer-'+sid
+    need(active(unit+'.service') not in ('active','activating'), '交接任务已运行')
+    if s['phase'] in ('RESUMED','RETIRED'):
+        # These phases have already resolved ownership and need local cleanup
+        # only. They must not depend on another SSH authentication/connection.
+        worker(sid)
+        print('本机事务收尾完成；没有恢复旧快照。')
+        return
     control=Path('/run/qianyi')
     control.mkdir(mode=0o700,exist_ok=True)
     need(control.stat().st_uid == 0 and not control.stat().st_mode & 0o077 and not control.is_symlink(), 'SSH 控制目录权限不安全')
@@ -1602,8 +1657,6 @@ def launch(sid):
     proc=subprocess.run(args,check=False)
     need(proc.returncode == 0, 'SSH 认证失败；请先用 IP 正常 SSH，核对主机密钥')
     update_session(sid,ssh=settings)
-    unit='qianyi-transfer-'+sid
-    need(active(unit+'.service') not in ('active','activating'), '交接任务已运行')
     systemctl('reset-failed',unit+'.service',check=False)
     args=['systemd-run','--unit',unit,'--collect','--property=Type=exec','--property=UMask=0077',
           '--property=KillMode=control-group','/usr/bin/python3',PROGRAM,'worker',sid]

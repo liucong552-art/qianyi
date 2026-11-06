@@ -1,0 +1,152 @@
+{
+  "source": "https://github.com/liucong552-art/qianyi/actions/runs/42193015826",
+  "commit": "a44345912c8dc0a0d5b6dcc4bd0b39084cefa9c9",
+  "synthetic": true,
+  "port": 40000,
+  "ip_limit": 2,
+  "timeout_seconds": 120,
+  "order": [
+    "family",
+    "refresh",
+    "claim",
+    "drop"
+  ],
+  "expressions": [
+    [
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "meta": {
+              "key": "nfproto"
+            }
+          },
+          "right": 10
+        }
+      },
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "payload": {
+              "protocol": "tcp",
+              "field": "dport"
+            }
+          },
+          "right": 40000
+        }
+      },
+      {
+        "drop": null
+      }
+    ],
+    [
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "payload": {
+              "protocol": "tcp",
+              "field": "dport"
+            }
+          },
+          "right": 40000
+        }
+      },
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "payload": {
+              "protocol": "ip",
+              "field": "saddr"
+            }
+          },
+          "right": "@vr_il4_40000"
+        }
+      },
+      {
+        "set": {
+          "op": "update",
+          "elem": {
+            "elem": {
+              "val": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "saddr"
+                }
+              },
+              "timeout": 120
+            }
+          },
+          "set": "@vr_il4_40000"
+        }
+      },
+      {
+        "accept": null
+      }
+    ],
+    [
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "payload": {
+              "protocol": "tcp",
+              "field": "dport"
+            }
+          },
+          "right": 40000
+        }
+      },
+      {
+        "set": {
+          "op": "add",
+          "elem": {
+            "elem": {
+              "val": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "saddr"
+                }
+              },
+              "timeout": 120
+            }
+          },
+          "set": "@vr_il4_40000"
+        }
+      },
+      {
+        "accept": null
+      }
+    ],
+    [
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "meta": {
+              "key": "nfproto"
+            }
+          },
+          "right": 2
+        }
+      },
+      {
+        "match": {
+          "op": "==",
+          "left": {
+            "payload": {
+              "protocol": "tcp",
+              "field": "dport"
+            }
+          },
+          "right": 40000
+        }
+      },
+      {
+        "drop": null
+      }
+    ]
+  ]
+}
