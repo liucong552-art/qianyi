@@ -6,7 +6,11 @@
 
 ## 当前状态（2026-11-06）
 
-**用户已要求继续完成。正在进行最后修复与验证；尚未完成真实 VPS 验收。**
+**已按用户最新要求暂停并保存，供其他 AI 接手。优先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 和 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。**
+
+最新代码检查点为 943bd3eeab374003da42d7b49e60dc37692a4ac1。58 项单元测试通过；真实 nft/quota/IP/portbw/tc 脚本通过；新增 Reality 认证烟测仍失败，所以整体 CI 为失败（运行 42233920479）。最新失败摘要已存 docs/CI_LAST_FAILURE.txt。禁止宣称原链接实连或完整 VPS 交接已经验收。
+
+当前未完成工作的权威清单见 HANDOFF.md「下一步按顺序做」：Reality 失败根因、READY 自然到期后文件缺失的重启恢复边界、RESUMED 收尾的锁/到期处理、最终复核与文档、真实 VPS 验收。下面保留开发过程记录，较旧的测试数量不代表最新总数。
 
 接续检查点：已修复 gate 等待 watchdog 的 temp.lock、RESUMED 收尾不必要的 SSH 依赖，补齐原生 IP 防护完整表达式校验、孤立防护对象检查及订阅刷新。53 项本地测试通过；新的 CI 结果待确认。真实 nft JSON 已固化为 tests/fixtures/nft-iplimit-debian13.json，不再依赖会过期的 CI 日志。
 

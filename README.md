@@ -4,7 +4,7 @@
 
 **当前是待真实 VPS 验收的实现版本。** 已有可运行代码和本地自动化测试；没有在你的两台 VPS 上运行过，不能把本地测试通过理解为生产验收完成。首次先按 [VPS 验收清单](docs/VPS_ACCEPTANCE.md) 在测试节点/测试服务器演练。实时进度保存在 [PROGRESS.md](PROGRESS.md)，源码依据在 [SOURCE_AUDIT.md](docs/SOURCE_AUDIT.md)。
 
-正在完成最后一轮修复与验证，当前状态见 [PROGRESS.md](PROGRESS.md)。此前 gate 与原 watchdog 的 temp.lock 等待问题已修复并增加实际文件锁回归测试；真实 VPS 验收仍未完成。
+**当前已暂停并保存供接手。** 58 项单元测试、原生 nft/quota/IP/portbw/tc 测试通过，但新增 Reality 认证烟测仍失败，尚有到期恢复边界待检查，不能用于生产交接。详见 [PROGRESS.md](PROGRESS.md) 和 [接手说明](docs/HANDOFF.md)。此前 watchdog 的 temp.lock 等待问题已修复并有实际文件锁回归测试。
 
 ## 保留什么
 

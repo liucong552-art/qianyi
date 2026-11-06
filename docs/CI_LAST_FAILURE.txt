@@ -1,0 +1,54 @@
+Source: https://github.com/liucong552-art/qianyi/actions/runs/42233920479
+Commit: 943bd3eeab374003da42d7b49e60dc37692a4ac1
+Only synthetic disposable-container diagnostics. Key-related diagnostic lines omitted.
+
+2026-11-06T14:26:47.8135974Z Synthetic test curl exit: 28
+2026-11-06T14:26:47.8136416Z Traceback (most recent call last):
+2026-11-06T14:26:47.8136825Z   File "/src/tests/reality_smoke.py", line 144, in <module>
+2026-11-06T14:26:47.8137265Z     servers.enter_context(serve(n,name));connect(url)
+2026-11-06T14:26:47.8137632Z                                          ~~~~~~~^^^^^
+2026-11-06T14:26:47.8138000Z   File "/src/tests/reality_smoke.py", line 135, in connect
+2026-11-06T14:26:47.8138735Z     assert result.returncode == 0 and result.stdout == b'qianyi-original-link-ok', 'original VLESS URL authentication failed'
+2026-11-06T14:26:47.8139441Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-11-06T14:26:47.8139985Z AssertionError: original VLESS URL authentication failed
+2026-11-06T14:26:47.8140489Z Synthetic CI diagnostics: source-vless-temp-test41000.json.log
+2026-11-06T14:26:47.8141007Z Xray 26.10.31 (Xray, Penetrates Everything.) a4a3dff (go1.27.3 linux/amd64)
+2026-11-06T14:26:47.8141422Z A unified platform for anti-censorship.
+2026-11-06T14:26:47.8142070Z 2026/11/06 14:26:41.531943 [Info] infra/conf/serial: Reading config: &{Name:/tmp/tmpq90ws3f7/source-vless-temp-test41000.json Format:json}
+2026-11-06T14:26:47.8143131Z 2026/11/06 14:26:41.532403 [Warning] infra/conf: REALITY: Listening on non-443 ports will increase the likelihood of your server's IP being blocked by the GFW
+2026-11-06T14:26:47.8143899Z 2026/11/06 14:26:41.532927 [Debug] app/log: Logger started
+2026-11-06T14:26:47.8144415Z 2026/11/06 14:26:41.532972 [Debug] app/proxyman/inbound: creating stream worker on 0.0.0.0:41000
+2026-11-06T14:26:47.8145178Z 2026/11/06 14:26:41.533162 [Info] transport/internet/tcp: listening tcp on 0.0.0.0:41000
+2026-11-06T14:26:47.8145691Z 2026/11/06 14:26:41.533374 [Warning] core: Xray 26.10.31 started
+2026-11-06T14:26:47.8146057Z REALITY remoteAddr: 127.0.0.1:42884
+2026-11-06T14:26:47.8146480Z REALITY remoteAddr: 127.0.0.1:42884	hs.c.isHandshakeComplete.Load(): false
+2026-11-06T14:26:47.8147308Z 2026/11/06 14:26:41.575408 [Info] transport/internet/tcp: REALITY: processed invalid connection from 127.0.0.1:42884: failed to read client hello
+2026-11-06T14:26:47.8148044Z REALITY remoteAddr: 127.0.0.1:42886
+2026-11-06T14:26:47.8149485Z REALITY remoteAddr: 127.0.0.1:42886	hs.c.ClientVer: [26 10 31]
+2026-11-06T14:26:47.8150044Z REALITY remoteAddr: 127.0.0.1:42886	hs.c.ClientTime: 2026-11-06 14:26:41 +0000 UTC
+2026-11-06T14:26:47.8150668Z REALITY remoteAddr: 127.0.0.1:42886	hs.c.ClientShortId: [1 35 69 103 137 171 205 239]
+2026-11-06T14:26:47.8151206Z REALITY remoteAddr: 127.0.0.1:42886	hs.c.conn == conn: true
+2026-11-06T14:26:47.8151609Z Synthetic CI diagnostics: tls.log
+2026-11-06T14:26:47.8151946Z Using default temp DH parameters
+2026-11-06T14:26:47.8152233Z ACCEPT
+2026-11-06T14:26:47.8152802Z 80374C1CE8720000:error:0A000126:SSL routines::unexpected eof while reading:../ssl/record/rec_layer_s3.c:698:
+2026-11-06T14:26:47.8153790Z 80374C1CE8720000:error:0A000106:SSL routines:tls_get_more_records:unexpected ccs message:../ssl/record/methods/tls_common.c:764:
+2026-11-06T14:26:47.8154871Z 80374C1CE8720000:error:0A000139:SSL routines::record layer failure:../ssl/record/rec_layer_s3.c:698:
+2026-11-06T14:26:47.8155883Z 80374C1CE8720000:error:0A000412:SSL routines:ssl3_read_bytes:ssl/tls alert bad certificate:../ssl/record/rec_layer_s3.c:918:SSL alert number 42
+2026-11-06T14:26:47.8156975Z 80374C1CE8720000:error:0A000106:SSL routines:tls_get_more_records:unexpected ccs message:../ssl/record/methods/tls_common.c:764:
+2026-11-06T14:26:47.8157873Z 80374C1CE8720000:error:0A000139:SSL routines::record layer failure:../ssl/record/rec_layer_s3.c:698:
+2026-11-06T14:26:47.8158718Z Synthetic CI diagnostics: client.log
+2026-11-06T14:26:47.8159160Z Xray 26.10.31 (Xray, Penetrates Everything.) a4a3dff (go1.27.3 linux/amd64)
+2026-11-06T14:26:47.8159820Z A unified platform for anti-censorship.
+2026-11-06T14:26:47.8160428Z 2026/11/06 14:26:41.585195 [Info] infra/conf/serial: Reading config: &{Name:/tmp/tmpq90ws3f7/client.json Format:json}
+2026-11-06T14:26:47.8161093Z 2026/11/06 14:26:41.585996 [Debug] app/log: Logger started
+2026-11-06T14:26:47.8161656Z 2026/11/06 14:26:41.586009 [Debug] app/proxyman/inbound: creating stream worker on 127.0.0.1:59923
+2026-11-06T14:26:47.8162299Z 2026/11/06 14:26:41.586099 [Info] transport/internet/tcp: listening tcp on 127.0.0.1:59923
+2026-11-06T14:26:47.8162777Z 2026/11/06 14:26:41.586230 [Warning] core: Xray 26.10.31 started
+2026-11-06T14:26:47.8163362Z 2026/11/06 14:26:41.627522 [Info] [4266615834] proxy/socks: Connection closed immediately, likely health check connection
+2026-11-06T14:26:47.8164096Z 2026/11/06 14:26:41.633593 [Info] [736023934] proxy/socks: TCP Connect request to tcp:127.0.0.1:36233
+2026-11-06T14:26:47.8164984Z 2026/11/06 14:26:41.633615 [Info] [736023934] app/dispatcher: default route for tcp:127.0.0.1:36233
+2026-11-06T14:26:47.8165766Z 2026/11/06 14:26:41.633625 [Info] [736023934] transport/internet/tcp: dialing TCP to tcp:user41000.example.com:41000
+2026-11-06T14:26:47.8166627Z 2026/11/06 14:26:41.633631 [Debug] [736023934] transport/internet: dialing to tcp:user41000.example.com:41000
+2026-11-06T14:26:47.8167308Z 2026/11/06 14:26:41.633632 from tcp:127.0.0.1:34996 accepted tcp:127.0.0.1:36233
+2026-11-06T14:26:48.7159186Z ##[error]Process completed with exit code 1.
