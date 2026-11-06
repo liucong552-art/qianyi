@@ -4,13 +4,21 @@
 
 范围：不迁移 443，不改目标 WG/NAT，不改 DNS，不重装源机，不监控服务商额度。目标需实查为空；未知版本/残留/计数读取失败应拒绝。最终交接先冻结源流量及后台写入，再结算、快照、恢复目标防护、验证、放行。禁止旧余额重放；接管后回退需以新用量重新迁移。
 
-## 当前状态（2026-11-06）
+## 当前状态（2026-11-06 接续）
 
-**已按用户最新要求暂停并保存，供其他 AI 接手。优先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 和 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。**
+已从 GitHub main `fdb6d86` 接手，核对分支、提交与五份交接文档；没有使用原聊天或旧临时目录。原代码基线 58 项 unittest 已在本次环境重新通过。
 
-最新代码检查点为 943bd3eeab374003da42d7b49e60dc37692a4ac1。58 项单元测试通过；真实 nft/quota/IP/portbw/tc 脚本通过；新增 Reality 认证烟测仍失败，所以整体 CI 为失败（运行 42233920479）。最新失败摘要已存 docs/CI_LAST_FAILURE.txt。禁止宣称原链接实连或完整 VPS 交接已经验收。
+### 阶段 1：Reality 烟测诊断与测试夹具修复
 
-当前未完成工作的权威清单见 HANDOFF.md「下一步按顺序做」：Reality 失败根因、READY 自然到期后文件缺失的重启恢复边界、RESUMED 收尾的锁/到期处理、最终复核与文档、真实 VPS 验收。下面保留开发过程记录，较旧的测试数量不代表最新总数。
+- 使用校验过 SHA-256 的官方 Xray v26.10.31，在非特权本地诊断程序中复现旧夹具 curl 28。该诊断只测普通节点，连接地址临时指向 loopback，不算完整原 URL / NAT 验收。
+- 串行 OpenSSL `s_server` 无法同时处理 Xray 的 ALPN/CCS 后台探测和实际握手。改为逐连接线程 TLS 1.3 目标后，日志出现 `hs.readClientFinished() err: <nil>`、`uConn.Verified: true`，证明原合成 Reality 凭据可认证。
+- 随后发现第二层失败：v26.10.31 freedom 默认阻断 VLESS 的私网/回环目标，日志为 `blocked target ... blackholing connection`。源码依据和复现过程见 docs/TESTING.md。
+- 完整烟测改用隔离 netns 内本地绑定的全局地址类别 /32，并断言路由为 local/lo；不修改原节点 freedom/NAT 出站策略，不访问外部 HTTP。保持错误公钥拒绝、多轮、三个独立密钥等原断言。
+- 新增真实 TLS socket 并发回归，本次 59 项 unittest 及 Python 编译通过；完整 Debian 13 / nft / portbw / Reality CI **等待本阶段提交后的运行结果**，尚不能记为通过。真实 VPS 仍未执行。
+
+下一阶段：修复 READY 到期文件缺失、RESUMED 当前状态与持锁验证边界，补故障回归及操作文档。旧失败证据 docs/CI_LAST_FAILURE.txt 保留。
+
+## 之前的开发记录（历史，非当前验收结论）
 
 接续检查点：已修复 gate 等待 watchdog 的 temp.lock、RESUMED 收尾不必要的 SSH 依赖，补齐原生 IP 防护完整表达式校验、孤立防护对象检查及订阅刷新。53 项本地测试通过；新的 CI 结果待确认。真实 nft JSON 已固化为 tests/fixtures/nft-iplimit-debian13.json，不再依赖会过期的 CI 日志。
 

@@ -6,12 +6,10 @@ public DNS propagation or a WireGuard peer. NAT's authentication/configuration
 is exercised with its SO_MARK preserved, but its WG egress still needs VPS QA.
 """
 import contextlib
-import copy
 import http.server
 import json
 import os
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -19,6 +17,7 @@ import threading
 import time
 import urllib.parse
 from test_qianyi import q, node
+from tls_target import tls_target
 
 if os.environ.get('QIANYI_DISPOSABLE_NETNS') != '1':
     raise SystemExit('Run only in the disposable CI container.')
@@ -66,23 +65,29 @@ class Destination(http.server.BaseHTTPRequestHandler):
 
 with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifetime:
     root=Path(directory)
-    destination=http.server.ThreadingHTTPServer(('127.0.0.1',0),Destination)
+    # Xray v26.10.31's freedom blocks private/special destinations by default,
+    # including loopback and TEST-NET. Bind a global-category /32 locally in the
+    # disposable netns instead of changing the nodes' original outbound policy.
+    # Fail before any curl unless the route is LOCAL; no public HTTP is used.
+    dest_ip='93.184.216.34'
+    q.run(['ip','address','add',dest_ip+'/32','dev','lo'])
+    lifetime.callback(q.run,['ip','address','del',dest_ip+'/32','dev','lo'])
+    route=q.jsoncmd(['ip','-j','route','get',dest_ip])[0]
+    assert route['type'] == 'local' and route['dev'] == 'lo', 'HTTP target must stay inside the test netns'
+    destination=http.server.ThreadingHTTPServer((dest_ip,0),Destination)
     threading.Thread(target=destination.serve_forever,daemon=True).start()
     lifetime.callback(destination.server_close);lifetime.callback(destination.shutdown)
     dest_port=destination.server_port
-    tls_port=free_port()
     q.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
            '-subj','/CN=tls.example.com','-keyout',root/'tls.key','-out',root/'tls.crt'])
-    lifetime.enter_context(process(['openssl','s_server','-accept',f'127.0.0.1:{tls_port}',
-                                    '-tls1_3','-cert',str(root/'tls.crt'),'-key',str(root/'tls.key'),
-                                    '-groups','X25519','-alpn','h2,http/1.1','-www'],tls_port,root/'tls.log'))
+    tls_port=lifetime.enter_context(tls_target(root/'tls.crt',root/'tls.key'))
 
     def fixture(port,key,nat=False):
         n=node(port,nat=nat,key=key);m=n['meta'];cfg=json.loads(n['config'])
         cfg['log']['loglevel']='debug'  # synthetic CI fixtures only
         m.update(REALITY_DEST=f'127.0.0.1:{tls_port}',REALITY_SNI='tls.example.com')
         reality=cfg['inbounds'][0]['streamSettings']['realitySettings']
-        reality.update(dest=m['REALITY_DEST'],serverNames=[m['REALITY_SNI']],show=True)
+        reality.update(dest=m['REALITY_DEST'],serverNames=[m['REALITY_SNI']],show=False)
         # These keys are deterministic public fixtures, never user credentials.
         derived=q.output([XRAY,'x25519','-i',reality['privateKey']])
         assert m['PBK'] in derived, 'OpenSSL and Xray disagree on fixture public key'
@@ -118,12 +123,12 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
                 'settings':{'vnext':[{'address':link.hostname,'port':link.port,'users':[{
                     'id':link.username,'encryption':get('encryption'),'flow':get('flow')}]}]},
                 'streamSettings':{'network':get('type'),'security':get('security'),'realitySettings':{
-                    'show':True,'serverName':get('sni'),'fingerprint':get('fp'),'publicKey':wrong_key or get('pbk'),
+                    'show':False,'serverName':get('sni'),'fingerprint':get('fp'),'publicKey':wrong_key or get('pbk'),
                     'shortId':get('sid')}}}]}
         path=root/'client.json';q.save(path,config)
         with process([XRAY,'run','-config',str(path)],port,root/'client.log'):
             result=q.run(['curl','--silent','--show-error','--max-time','6','--noproxy','',
-                          '--socks5-hostname',f'127.0.0.1:{port}',f'http://127.0.0.1:{dest_port}/'],check=False,timeout=10)
+                          '--socks5-hostname',f'127.0.0.1:{port}',f'http://{dest_ip}:{dest_port}/'],check=False,timeout=10)
             if wrong_key:
                 assert result.returncode != 0, 'incorrect Reality key authenticated'
             else:
