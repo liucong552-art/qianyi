@@ -79,6 +79,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
 
     def fixture(port,key,nat=False):
         n=node(port,nat=nat,key=key);m=n['meta'];cfg=json.loads(n['config'])
+        cfg['log']['loglevel']='debug'  # synthetic CI fixtures only
         m.update(REALITY_DEST=f'127.0.0.1:{tls_port}',REALITY_SNI='tls.example.com')
         cfg['inbounds'][0]['streamSettings']['realitySettings'].update(dest=m['REALITY_DEST'],serverNames=[m['REALITY_SNI']])
         n['config']=json.dumps(cfg)
@@ -108,7 +109,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
         link=urllib.parse.urlsplit(original_url.strip());params=urllib.parse.parse_qs(link.query)
         get=lambda key:params[key][0]
         port=free_port()
-        config={'log':{'loglevel':'warning'},'inbounds':[{'listen':'127.0.0.1','port':port,'protocol':'socks',
+        config={'log':{'loglevel':'debug'},'inbounds':[{'listen':'127.0.0.1','port':port,'protocol':'socks',
                 'settings':{'auth':'noauth','udp':False}}], 'outbounds':[{'protocol':'vless',
                 'settings':{'vnext':[{'address':link.hostname,'port':link.port,'users':[{
                     'id':link.username,'encryption':get('encryption'),'flow':get('flow')}]}]},
@@ -122,6 +123,11 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
             if wrong_key:
                 assert result.returncode != 0, 'incorrect Reality key authenticated'
             else:
+                if result.returncode != 0 or result.stdout != b'qianyi-original-link-ok':
+                    print('Synthetic test curl exit:',result.returncode)
+                    for log in root.glob('*.log'):
+                        print('Synthetic CI diagnostics:',log.name)
+                        print('\n'.join(log.read_text(errors='replace').splitlines()[-18:]))
                 assert result.returncode == 0 and result.stdout == b'qianyi-original-link-ok', 'original VLESS URL authentication failed'
 
     original=[n['url'] for n in nodes]
