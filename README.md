@@ -4,6 +4,8 @@
 
 **当前是待真实 VPS 验收的实现版本。** 已有可运行代码和本地自动化测试；没有在你的两台 VPS 上运行过，不能把本地测试通过理解为生产验收完成。首次先按 [VPS 验收清单](docs/VPS_ACCEPTANCE.md) 在测试节点/测试服务器演练。实时进度保存在 [PROGRESS.md](PROGRESS.md)，源码依据在 [SOURCE_AUDIT.md](docs/SOURCE_AUDIT.md)。
 
+**开发已按用户要求暂停。最后复查发现 gate 与原 watchdog 的 temp.lock 存在死锁风险，尚未修复；当前不要用于生产交接。** 下次继续先处理 PROGRESS.md 中的待完成项。
+
 ## 保留什么
 
 | 对象 | 迁移行为 |
