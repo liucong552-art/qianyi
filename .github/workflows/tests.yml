@@ -25,9 +25,20 @@ jobs:
           repository: liucong552-art/jieshu
           ref: 3e1972393cd9e6f097b27b76f919a649def61ae4
           path: audited-upstream
+      - name: Fetch pinned official Xray for synthetic authentication test
+        run: |
+          mkdir -p ci-bin
+          curl --fail --location --retry 3 https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip -o "$RUNNER_TEMP/xray.zip"
+          python3 - "$RUNNER_TEMP/xray.zip" <<'PY'
+          import hashlib,pathlib,sys,zipfile
+          archive=pathlib.Path(sys.argv[1])
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == 'e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214'
+          with zipfile.ZipFile(archive) as z:
+              p=pathlib.Path('ci-bin/xray');p.write_bytes(z.read('xray'));p.chmod(0o755)
+          PY
       - name: Native nftables in isolated Debian 13 container
         run: |
           docker run --rm --cap-add NET_ADMIN \
             -e QIANYI_DISPOSABLE_NETNS=1 -e PYTHONDONTWRITEBYTECODE=1 \
             -v "$PWD:/src:ro" -w /src debian:13-slim \
-            sh -ec 'apt-get update -qq; apt-get install -y -qq python3 openssl nftables iproute2; python3 tests/nft_kernel.py; python3 tests/native_portbw.py'
+            sh -ec 'apt-get update -qq; apt-get install -y -qq python3 openssl nftables iproute2 curl; python3 tests/nft_kernel.py; python3 tests/native_portbw.py; python3 tests/reality_smoke.py'

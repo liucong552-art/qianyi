@@ -452,8 +452,11 @@ def locks(paths=LOCKS, readonly=False):
 
 
 def library(script):
-    return output(['bash', '-c', LIB_PREFIX+script], env={
-        'VR_TEMP_LOCK_HELD':'1','VR_PQ_LOCK_HELD':'1','VR_IL_LOCK_HELD':'1'})
+    try:
+        return output(['bash', '-c', LIB_PREFIX+script], env={
+            'VR_TEMP_LOCK_HELD':'1','VR_PQ_LOCK_HELD':'1','VR_IL_LOCK_HELD':'1'})
+    except Error as exc:
+        raise Error(f'原生防护/管理操作 {script.split()[0]} 失败；已保留事务状态') from exc
 
 
 def systemctl(*args, check=True):
@@ -578,6 +581,11 @@ def check_preserved(before):
 def extract_restrictions(rows, ports):
     result = {p:{'paused':False,'bans':[]} for p in ports}
     tables = {x['table']['name'] for x in rows if 'table' in x}
+    if 'jsh_cidrban' in tables:
+        chains=[x['chain'] for x in rows if x.get('chain',{}).get('table') == 'jsh_cidrban']
+        need(len(chains) == 1 and chains[0].get('name') == 'pre' and chains[0].get('hook') == 'prerouting'
+             and chains[0].get('type') == 'filter' and chains[0].get('prio') == -150
+             and chains[0].get('policy') == 'accept', 'CIDR 黑名单基链不是已审计版本')
     for p in ports:
         t = f'pause_vless_{p}'
         if t in tables:
@@ -1470,6 +1478,7 @@ def gate(tag):
 def boot_restore():
     with locks():
         sync_fence()
+        verify_ban_restore()
         for p in (STATE/'pauses').glob('*'):
             port=uint(p.name,'暂停端口',65535)
             apply_pause(port)
@@ -1491,6 +1500,18 @@ def boot_restore():
                 mod.validate_record(p,rec); mod.volatile_clear(p); mod.write_json(mod.port_file(p),rec)
         origins[boot_id()]=time.time()-boottime()
         save(path,origins)
+
+
+def verify_ban_restore():
+    # The current native persistence file is authoritative after legitimate
+    # unban commands. Do not reinstall restrictions from an old snapshot.
+    tables={x['table']['name'] for x in nft_rows() if 'table' in x}
+    for module in ('cidrban','ipban'):
+        path=f'/etc/jsh-{module}.nft'
+        if regular(path,False) is None:
+            continue
+        need(systemctl('show','-p','Result','--value',f'jsh-{module}.service') == 'success'
+             and f'jsh_{module}' in tables, f'jsh-{module} 重启恢复失败；禁止启动迁入节点')
 
 
 def ssh_args(settings, master=False):
@@ -1518,8 +1539,8 @@ def remote(settings, action, payload, bootstrap=False):
         command='python3 -c '+shlex.quote(py)
     else:
         command='python3 '+PROGRAM+' agent '+action
-    # Inherit stderr only at the SSH layer for normal authentication/host-key
-    # diagnostics; remote program messages contain no node credentials.
+    # SSH password interaction uses the terminal. Captured stderr is never
+    # logged; safe agent errors travel in the JSON response instead.
     r=run(ssh_args(settings)+[command],data=encoded(payload),timeout=900,check=False)
     if r.returncode:
         raise Error(f'SSH/目标动作 {action} 失败（{r.returncode}），状态已保留；用 status/resume 检查')
@@ -1527,7 +1548,11 @@ def remote(settings, action, payload, bootstrap=False):
         reply=json.loads(r.stdout)
     except ValueError as e:
         raise Error('目标响应不是有效协议消息，交接结果视为不确定') from e
-    need(isinstance(reply,dict) and reply.get('ok') is True, '目标没有确认动作成功')
+    need(isinstance(reply,dict), '目标没有返回有效协议对象')
+    if reply.get('ok') is not True:
+        message=reply.get('error','目标没有确认动作成功')
+        need(isinstance(message,str), '目标错误响应格式异常')
+        raise Error(f'目标 {action}：{message[:1000]}')
     return reply['result']
 
 
@@ -1698,9 +1723,12 @@ def main():
     need(os.geteuid() == 0, '请使用 root 运行')
     os.umask(0o077)
     if args.action == 'agent':
-        req=json.loads(sys.stdin.buffer.read(64*1024*1024))
-        result=agent_action(args.operation,req)
-        print(json.dumps({'ok':True,'result':result},ensure_ascii=False))
+        try:
+            req=json.loads(sys.stdin.buffer.read(64*1024*1024))
+            reply={'ok':True,'result':agent_action(args.operation,req)}
+        except Exception as exc:
+            reply={'ok':False,'error':str(exc) if isinstance(exc,Error) else f'内部检查失败：{type(exc).__name__}'}
+        print(json.dumps(reply,ensure_ascii=False))
     elif args.action in ('preflight','prepare','migrate'):
         host=args.target or input('目标服务器公网 IPv4：').strip()
         settings={'host':host,'port':args.ssh_port,'identity':args.identity}

@@ -363,6 +363,22 @@ class DurableTests(unittest.TestCase):
                 q.gate(n['meta']['TAG'])
                 verify.assert_called_once()
 
+    def test_remote_reports_safe_preflight_error_not_stderr(self):
+        reply=subprocess.CompletedProcess([],0,q.encoded({'ok':False,'error':'WG MARK 不匹配'}),b'secret stderr must not leak')
+        with patch.object(q,'run',return_value=reply),patch.object(q,'ssh_args',return_value=['ssh']):
+            with self.assertRaises(q.Error) as error:q.remote({},'probe-target',{})
+        self.assertIn('WG MARK',str(error.exception))
+        self.assertNotIn('secret',str(error.exception))
+
+    def test_failed_blacklist_boot_restore_blocks_gate_dependency(self):
+        with patch.object(q,'regular',return_value=b'test persisted rules'),patch.object(q,'nft_rows',return_value=[]),patch.object(q,'systemctl',return_value='exit-code'):
+            with self.assertRaises(q.Error):q.verify_ban_restore()
+
+    def test_removed_native_bans_do_not_return_from_snapshot(self):
+        self.init(role='target',phase='OPEN')
+        with patch.object(q,'regular',return_value=None),patch.object(q,'nft_rows',return_value=[]),patch.object(q,'nft') as mutate:
+            q.verify_ban_restore();mutate.assert_not_called()
+
 
 class RestrictionTests(unittest.TestCase):
     def cidr(self,port=40000,addr='10.2.0.0',prefix=24):
@@ -379,6 +395,10 @@ class RestrictionTests(unittest.TestCase):
     def test_forged_ban_comment_rejected(self):
         r=self.cidr();r['rule']['expr'][2]['match']['right']=443
         with self.assertRaises(q.Error):q.extract_restrictions([r],{40000})
+
+    def test_cidr_chain_cannot_bypass_prerouting(self):
+        rows=[{'table':{'name':'jsh_cidrban','family':'inet'}},{'chain':{'table':'jsh_cidrban','name':'pre','hook':'output','prio':-150,'type':'filter','policy':'accept'}},self.cidr()]
+        with self.assertRaises(q.Error):q.extract_restrictions(rows,{40000})
 
     def test_unknown_firewall_ban_rejected(self):
         row={'rule':{'table':'custom','chain':'input','expr':[{'drop':None}]}}

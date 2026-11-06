@@ -7,3 +7,5 @@ dist/
 *.key
 runtime/
 sessions/
+ci-bin/
+audited-upstream/
