@@ -18,7 +18,7 @@
 - **Reality 烟测已修复并通过。** 阶段 1 `f1ac316`：[CI 42236445140](https://github.com/liucong552-art/qianyi/actions/runs/42236445140)。串行 TLS 目标与新版 freedom 对回环 HTTP 的拦截是两个独立原因，证据与固定官方源码链接见 [TESTING.md](TESTING.md)。旧失败 42233920479 及 CI_LAST_FAILURE.txt 为历史记录。
 - **READY/RESUMED 到期与锁修复已提交。** 阶段 2 `9f026cd`：[CI 42237634038](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 全部成功。本地 73 项 unittest 通过；其中 14 项新增到期/恢复/真实 flock 回归，systemd/nft 调用仍是夹具。
 - Debian 13 隔离容器中的真实上游 quota/IP/nft、portbw/nft/tc、固定 Xray v26.10.31 原 URL/独立密钥/错误公钥/新增节点多轮烟测均通过。这些脚本未执行完整迁移 CLI、SSH、systemd 重启或真实 WG。
-- 本轮文档整理同时加强了两处既有断言：RESUMED 回归直接调用真实 verify_protection 逻辑（输入为受控 nft 夹具）；错误公钥拒绝后立即再测同一服务的正确原 URL。其最终 CI 结果以 PROGRESS.md / main 最新提交为准。
+- 本轮文档整理同时加强了两处既有断言：RESUMED 回归直接调用真实 verify_protection 逻辑（输入为受控 nft 夹具）；错误公钥拒绝后立即再测同一服务的正确原 URL。最终提交 `1c40cc0` 的 [CI 42238894007](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 已确认全部通过；后续仅记录结果的提交不修改已测代码。
 - **仍未完成真实 VPS 验收。** 不得据容器烟测声称公网原链接、WG 出站、正常重启、掉线恢复、双向多轮交接已经验收。
 
 ## 下一步按顺序做

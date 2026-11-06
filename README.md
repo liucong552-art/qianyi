@@ -4,7 +4,7 @@
 
 **当前是待真实 VPS 验收的实现版本。** 已有可运行代码和本地自动化测试；没有在你的两台 VPS 上运行过，不能把本地测试通过理解为生产验收完成。首次先按 [VPS 验收清单](docs/VPS_ACCEPTANCE.md) 在测试节点/测试服务器演练。实时进度保存在 [PROGRESS.md](PROGRESS.md)，源码依据在 [SOURCE_AUDIT.md](docs/SOURCE_AUDIT.md)。
 
-**接续修复已完成，仍待真实 VPS 验收。** 73 项本地测试通过；提交 `9f026cd` 的 [完整 CI](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已通过原生 nft/quota/IP/portbw/tc 和固定 Xray Reality 烟测。已修复 TLS 测试夹具、READY 到期文件缺失及 RESUMED 收尾锁边界。烟测保留普通/NAT 原链接和独立密钥，但不运行完整迁移 CLI、systemd、SSH 或真实 WG。测试证据见 [TESTING.md](docs/TESTING.md)，最新检查点见 [PROGRESS.md](PROGRESS.md) 和 [接手说明](docs/HANDOFF.md)。
+**接续修复已完成，仍待真实 VPS 验收。** 73 项本地测试通过；提交 `1c40cc0` 的 [完整 CI](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 已通过原生 nft/quota/IP/portbw/tc 和固定 Xray Reality 烟测。已修复 TLS 测试夹具、READY 到期文件缺失及 RESUMED 收尾锁边界。烟测保留普通/NAT 原链接和独立密钥，但不运行完整迁移 CLI、systemd、SSH 或真实 WG。测试证据见 [TESTING.md](docs/TESTING.md)，最新检查点见 [PROGRESS.md](PROGRESS.md) 和 [接手说明](docs/HANDOFF.md)。
 
 ## 保留什么
 

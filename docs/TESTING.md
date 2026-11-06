@@ -39,4 +39,17 @@
 
 ## 最终复核（阶段 3）
 
-在上述回归中，最新用量场景已增强为直接调用 verify_protection（真实生产验证函数，内核输入仍是合成夹具）；Reality 负例后增加同一服务的正确原 URL 重连。本地 73 项测试、py_compile、standalone 构建/帮助及 diff 检查通过，固定上游 7 个源文件 SHA-256 核对一致（兼容清单仍为 39 个产物）。本阶段完整 CI 待提交后确认，真实 VPS 仍未执行。
+在上述回归中，最新用量场景已增强为直接调用 verify_protection（真实生产验证函数，内核输入仍是合成夹具）；Reality 负例后增加同一服务的正确原 URL 重连。本地 73 项测试、py_compile、standalone 构建/帮助及 diff 检查通过，固定上游 7 个源文件 SHA-256 核对一致（兼容清单仍为 39 个产物）。阶段 3 提交 `1c40cc077edb947eb83f057649443236b69763cb` 的 [CI 42238894007](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 已通过；真实 VPS 仍未执行。
+
+## 最终 CI 记录（已核对 job 与日志）
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| unit，job 127963685670 | success | 73 tests / OK；standalone build/help |
+| debian13-nft，job 127963686186 | success | Debian 13.7 / nftables 1.1.3；三个原生脚本依次完成 |
+| quota/IP/nft | 通过 | 本地 TCP 计入 8728 字节；结算/耗尽/IP/CIDR/暂停/屏障 |
+| portbw/nft/tc | 通过 | 静态上下行配置、hold/cooldown、拥塞期限、tc 重试、保留 443 策略/root qdisc |
+| Xray v26.10.31 | 通过 | 普通与带 mark NAT 原链接、三套密钥、进程替换/新增轮次、错误公钥拒绝后正确原链接仍可连接 |
+| 两台真实 VPS、完整 CLI、SSH、systemd、WG、公共 DNS | **未执行** | 需要真实测试环境；见 VPS_ACCEPTANCE.md |
+
+以上仅为合成测试结果摘要，不包含服务器凭据或迁移快照。后续保存此证据的提交仅修改文档，已测代码仍对应 `1c40cc0`。

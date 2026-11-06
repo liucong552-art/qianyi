@@ -6,6 +6,8 @@
 
 ## 当前状态（2026-11-06 接续）
 
+**本轮代码、测试和操作说明已完成并分阶段提交 main；仍待真实 VPS 验收。** 最后包含测试变更的提交为 `1c40cc077edb947eb83f057649443236b69763cb`，完整 CI [42238894007](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 的 unit / debian13-nft 均成功。后续仅保存这份结果与交接文档，不改变已测代码。
+
 已从 GitHub main `fdb6d86` 接手，核对分支、提交与五份交接文档；没有使用原聊天或旧临时目录。原代码基线 58 项 unittest 已在本次环境重新通过。
 
 ### 阶段 1：Reality 烟测诊断与测试夹具修复
@@ -31,7 +33,7 @@
 - 写明 READY / RESUMED 自然到期、文件缺失、残留监听、锁等待的操作与停止条件；真实 VPS 清单增加部分/全部到期、重置中断、收尾前后新增流量、watchdog restart/gate 锁与 GC/save/reset 并发验证。
 - 代码复核确认：READY 仅未 OPEN 可恢复，RESUMED 不调用旧快照恢复；metadata/防护读验同锁，systemd start 在锁外；原身份、期限、链接和独立凭据继续校验。443/WG 的摘要保护及固定兼容清单未改变。
 - 增强现有回归：70 GiB 持久 + 3 GiB 实时用量场景直接执行 verify_protection；错误公钥拒绝后立即用同一服务正确原 URL 重连，避免把服务异常误判为拒绝认证。
-- 本地 73 项测试、Python 编译、standalone 构建/帮助、diff 检查通过；固定上游 7 个源文件 SHA-256 与 39 个产物清单核对一致，未运行安装器。此阶段新的完整 CI 待提交后确认。
+- 本地 73 项测试、Python 编译、standalone 构建/帮助、diff 检查通过；固定上游 7 个源文件 SHA-256 与 39 个产物清单核对一致，未运行安装器。阶段 3 提交 `1c40cc0` 的 [完整 CI 42238894007](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 已通过，并核对两个 job 的步骤与测试摘要。
 
 ## 之前的开发记录（历史，非当前验收结论）
 
@@ -53,15 +55,24 @@
 - 最新代码提交 `a44345912c8dc0a0d5b6dcc4bd0b39084cefa9c9` 的两个 CI job 均已通过：[运行记录](https://github.com/liucong552-art/qianyi/actions/runs/42193015826)。此轮直接从固定上游 vless.sh 提取 common/quota/IP 库，在隔离 Debian 13 容器中实际执行恢复、TCP 计量、结算、耗尽规则、限制识别及屏障检查。
 - **尚未完成真实 VPS 验收，不能据此声称可直接用于生产。** 没有服务器登录信息，也没有对真实用户节点执行任何操作。
 
+## 本轮持久检查点
+
+| 提交 | 内容 | 实际结果 |
+|---|---|---|
+| `f1ac316` | Reality TLS/HTTP 夹具修复与根因证据 | CI 42236445140 全部成功；59 项 unittest |
+| `9f026cd` | READY 到期恢复、RESUMED 当前状态与锁、14 项回归 | CI 42237634038 全部成功；73 项 unittest |
+| `1c40cc0` | 操作/交接文档、增强真实验证逻辑及认证负例 | CI 42238894007 全部成功；73 项 unittest |
+
+最终容器日志：Debian 13.7、nftables 1.1.3，TCP 实际计入 8728 字节；上游 quota/IP/nft、portbw/tc、Xray 26.10.31 原 URL/三套密钥/多轮及错误公钥检查完成。完整 CLI/SSH/systemd/WG/真实 VPS 均未执行。没有上传真实用户凭据、私钥、迁移快照或服务器日志。
+
 ## 接续方法
 
 先阅读本文件、README.md 和 docs/SOURCE_AUDIT.md，查看最近提交、运行测试，再从未完成项继续。真实用户快照、凭据和私钥永不进入本仓库。每个阶段将更新此文件并提交。
 
 ## 待完成（当前）
 
-1. 本轮最后测试增强及文档提交后的完整 CI 确认，并将最终证据保存到本文件。
-2. 两台测试 Debian 13 VPS + 外部客户端执行完整 CLI / SSH / systemd / WG / 公网原链接验收。尚无真实 VPS 信息，此项未执行。
-3. 按 docs/VPS_ACCEPTANCE.md 重点测试真实 watchdog/gate 与 GC/save/reset 锁调度、READY 自然到期清理后重启、RESUMED 已有新增用量后收尾、多轮双向迁移；每项记录实际结果，不用模拟结果替代。
+1. 两台测试 Debian 13 VPS + 外部客户端执行完整 CLI / SSH / systemd / WG / 公网原链接验收。尚无真实 VPS 信息，此项未执行。
+2. 按 docs/VPS_ACCEPTANCE.md 重点测试真实 watchdog/gate 与 GC/save/reset 锁调度、READY 自然到期清理后重启、RESUMED 已有新增用量后收尾、多轮双向迁移；每项记录实际结果，不用模拟结果替代。
 
 ## 已保存的实现与测试边界
 

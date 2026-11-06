@@ -1,6 +1,6 @@
 # 真实 Debian 13 VPS 验收
 
-**本清单尚未在真实 VPS 执行，所有下列用例均待验收。** 本地 73 项测试及提交 `9f026cd` 的 [隔离 CI](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已通过真实 quota/IP/nft、portbw/tc、固定 Xray Reality 烟测；这些不等同于两台真实服务器的完整迁移。最新自动化证据见 [TESTING.md](TESTING.md)。
+**本清单尚未在真实 VPS 执行，所有下列用例均待验收。** 本地 73 项测试及提交 `1c40cc0` 的 [隔离 CI](https://github.com/liucong552-art/qianyi/actions/runs/42238894007) 已通过真实 quota/IP/nft、portbw/tc、固定 Xray Reality 烟测；这些不等同于两台真实服务器的完整迁移。最新自动化证据见 [TESTING.md](TESTING.md)。
 
 ## 环境
 
