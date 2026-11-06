@@ -39,19 +39,19 @@
     "/usr/local/sbin/vless_nat_preflight.sh": "c728158d5ef5cbc4a6595cd0bdb8fa4eb0a7b87e6b449d4397adeb02f4895c31",
     "/usr/local/sbin/vless_mktemp_nat.sh": "867f3973343b9a861b21fcb8ca3e28ba77b3edce0e345630a3dffd9d335559e6",
     "/usr/local/sbin/wg_nat_guard.sh": "f7f0d728a273e8af8f9e72a9eb6be8404129dc58a3477ac4087eddef3970d627",
-    "/usr/local/lib/portbw/portbw.py": "0e7e59c390d48b1d130c2907b9a438d6c22cf60972878508f728eef1cb0db0bc"
+    "/usr/local/lib/portbw/portbw.py": "66a79fd8ff9f4b00c43a62ef3530251cd6934301bfc5412d497b47d94a3f70d1"
   },
   "templates": {
     "direct": "[Unit]\nDescription=Temporary VLESS ${TAG} IPv${IP_VERSION}\nAfter=network-online.target vless-managed-restore.service\nWants=network-online.target\nConditionPathExists=${CFG}\nConditionPathExists=${META}\n\n[Service]\nType=simple\nUser=root\nGroup=root\nExecStart=/usr/local/sbin/vless_run_temp.sh ${TAG} ${CFG}\nExecStopPost=/usr/local/sbin/vless_cleanup_one.sh ${TAG} --from-stop-post\nRestart=on-failure\nRestartSec=3s\nSuccessExitStatus=0 124 143\nTimeoutStopSec=60\nNoNewPrivileges=true\nPrivateTmp=true\nPrivateDevices=true\n# \u6e05\u7406\u811a\u672c\u9700\u8981\u5237\u65b0 /root \u4e0b\u7684\u805a\u5408\u8ba2\u9605\uff0c\u56e0\u6b64\u4e0d\u9694\u79bb home \u76ee\u5f55\u3002\nProtectClock=true\nProtectHostname=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nRestrictNamespaces=true\nLockPersonality=true\nSystemCallArchitectures=native\nUMask=0077\n\n[Install]\nWantedBy=multi-user.target\n",
     "nat": "[Unit]\nDescription=Temporary VLESS NAT ${TAG} IPv${IP_VERSION}\nRequisite=wg-quick@${WG_IF}.service\nAfter=network-online.target vless-managed-restore.service wg-quick@${WG_IF}.service\nWants=network-online.target\nConditionPathExists=${CFG}\nConditionPathExists=${META}\n\n[Service]\nType=simple\nUser=root\nGroup=root\nExecStartPre=/usr/local/sbin/vless_nat_preflight.sh ${TAG}\nExecStart=/usr/local/sbin/vless_run_temp.sh ${TAG} ${CFG}\nExecStopPost=/usr/local/sbin/vless_cleanup_one.sh ${TAG} --from-stop-post\nRestart=on-failure\nRestartSec=3s\nSuccessExitStatus=0 124 143\nTimeoutStopSec=60\nNoNewPrivileges=true\nPrivateTmp=true\nPrivateDevices=true\n# \u6e05\u7406\u811a\u672c\u9700\u8981\u5237\u65b0 /root \u4e0b\u7684\u805a\u5408\u8ba2\u9605\uff0c\u56e0\u6b64\u4e0d\u9694\u79bb home \u76ee\u5f55\u3002\nProtectClock=true\nProtectHostname=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nRestrictNamespaces=true\nLockPersonality=true\nSystemCallArchitectures=native\nUMask=0077\n\n[Install]\nWantedBy=multi-user.target\n"
   },
   "sources": {
-    "natjichang.sh": "54e4363bc612d7dae5443a2470f501822608b2f5578350691f69aaa32afb2f05",
-    "portbw-install.sh": "f9caf62e24e5fade7b7f8035cc9869c537cff31305d2902c9c1c647a64e02edb",
-    "traffic.py": "249a79e16d3eedd718772f7d369dff59b832be5b1f9f5aba76824685e2f79145",
-    "README.md": "dce7ebc1a66fffa50424861f3376cd2c138edb5f1971feebc27c028a1ac0204d",
-    "vpswg.sh": "d78ca81bb41f8c84254cbb62fc695ccdc57292701ee66de094f7160b01edfddd",
-    "vless.sh": "8dda0ea8d2b75589114edc7fc059f6b0a4cbb23b9c60c1b7be6fc9a33298e013",
-    "portbw.py": "0e7e59c390d48b1d130c2907b9a438d6c22cf60972878508f728eef1cb0db0bc"
+    "natjichang.sh": "7be1ba1288bc17377dd0d0d71fdd9d6ea6b0ad6c3e638fa3a7743685b86db3d4",
+    "portbw-install.sh": "0f77b8f1d3e3ae8d3c515d6fe094208590cb08d85bee83988a03b635ea0a23b2",
+    "traffic.py": "8aba583afe39c5c8ad21efa6c4b2616ef4f47080d5810484a194b3ea5979af49",
+    "README.md": "6167b8a557de05aed2533148cb4e141d54bbf1d3134b7d3abbf4c5f0b413ddcc",
+    "vpswg.sh": "f0a08f33bc2b0221824e1ad0d6f11582ecd949306611417244696cf0934d129a",
+    "vless.sh": "77583d109225926d343e59ed7e0ec82666dd49a632c8ff6e447069991e967cfb",
+    "portbw.py": "66a79fd8ff9f4b00c43a62ef3530251cd6934301bfc5412d497b47d94a3f70d1"
   }
 }
