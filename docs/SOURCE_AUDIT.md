@@ -32,3 +32,11 @@
 本地单元/仿真测试不能证明两台真实 Debian 13 的 nftables、tc、systemd、SSH 与 Reality 外网连接已通过。交付文档必须单列真实 VPS 验收项。
 
 JSON 格式另核对 [Debian 13 libnftables-json(5)](https://manpages.debian.org/trixie/libnftables1/libnftables-json.5.en.html)：named quota 的 bytes/used/inv、named counter 引用、集合 timeout 单位为秒（不是内核 API 的毫秒）、动态 set 操作、th 端口及 concat 表达式。内核真实输出兼容性仍需 VPS 验收。
+
+## 接续复核：到期与锁（2026-11-06）
+
+重新取出上述固定提交，并对照 vless.sh 的 `vless_cleanup_one.sh`（4483–4589）、`vless_gc.sh`（4618–4659）、`vless_run_temp.sh`（到期 epoch/timeout）、`vr_pq_reset_due_one`（3543–3580）：原 stop-post 在 temp 锁忙时退出；到期清理可删除 config/unit/url/meta/quota/IP；原重置不会给已到期节点新周期。
+
+因此 READY 重启不能要求已清理到期节点仍有完整文件，更不能从快照重建它；RESUMED 已可能有新用量，只读当前持久/内核状态。current_nodes/verify_target/finish_source_resume 的读取与验证使用同一原生锁边界，systemd start 必须在锁外，否则 gate 会等待父进程持有的 quota/IP 锁。对应真实文件锁回归见 tests/test_recovery.py；真实 systemd/GC 调度仍待 VPS 验收。
+
+Reality 测试问题的官方 Xray/REALITY 源码依据独立列于 [TESTING.md](TESTING.md)，没有改变本兼容性清单的 jieshu 版本。

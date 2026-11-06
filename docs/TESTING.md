@@ -35,4 +35,8 @@
 
 本地共 73 项 unittest 通过。`tests/test_recovery.py` 使用真实私有临时文件及真实 flock，模拟 systemd/监听/nft；14 项新增用例覆盖：部分或全部节点已到期且文件已删、到期边界相等、未到期节点六类文件缺失、stop 失败且仍 active、到期节点残留监听、期限遭修改、READY 重置落盘后中断重试、RESUMED 最新 70 GiB 持久用量加 3 GiB 实时计数保持、实时计数缺失拒绝、启动时跨越到期、读取和验证持锁、systemd start 不持原生锁、verify 到期计数。
 
-这些测试不启动真实 systemd、SSH、WireGuard；完整系统恢复仍按 VPS_ACCEPTANCE.md 验收。阶段 2 的完整 CI 待提交后确认。
+这些测试不启动真实 systemd、SSH、WireGuard；完整系统恢复仍按 VPS_ACCEPTANCE.md 验收。阶段 2 `9f026cd` 的完整 CI [42237634038](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已通过两个 job。
+
+## 最终复核（阶段 3）
+
+在上述回归中，最新用量场景已增强为直接调用 verify_protection（真实生产验证函数，内核输入仍是合成夹具）；Reality 负例后增加同一服务的正确原 URL 重连。本地 73 项测试、py_compile、standalone 构建/帮助及 diff 检查通过，固定上游 7 个源文件 SHA-256 核对一致（兼容清单仍为 39 个产物）。本阶段完整 CI 待提交后确认，真实 VPS 仍未执行。

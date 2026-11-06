@@ -11,6 +11,7 @@ from test_qianyi import q, node, kernel, ip_kernel, SID, GIB
 
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
+        self.real_verify_protection=q.verify_protection
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name); self.now=1500000000
         self.lock_paths=[str(self.root/'locks'/str(i)) for i in range(len(q.LOCKS))]
@@ -161,6 +162,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(ns[0]['quota']['SAVED_USED_BYTES'],str(70*GIB))
             self.assertEqual(q.quota_live(ns[0]['quota'],q.nft_rows()),3*GIB)
             self.assertEqual(Path(quota_path).read_bytes(),before)
+            self.real_verify_protection(ns)
         original_verify.side_effect=inspect
         q.finish_source_resume(SID)
         self.assertEqual(original_verify.call_count,2)

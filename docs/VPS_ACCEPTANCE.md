@@ -1,6 +1,6 @@
 # 真实 Debian 13 VPS 验收
 
-**本清单尚未在真实 VPS 执行。** 本地 48 项测试及隔离 Debian 13 容器内的真实 quota/IP 库、nftables 测试已通过，不等同于下列真实系统验证。当前还有 PROGRESS.md 记录的待修复问题。不要拿真实用户先做破坏性故障注入。
+**本清单尚未在真实 VPS 执行，所有下列用例均待验收。** 本地 73 项测试及提交 `9f026cd` 的 [隔离 CI](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已通过真实 quota/IP/nft、portbw/tc、固定 Xray Reality 烟测；这些不等同于两台真实服务器的完整迁移。最新自动化证据见 [TESTING.md](TESTING.md)。
 
 ## 环境
 
@@ -44,10 +44,20 @@
 | 源结算意图落盘后中止 worker | resume 使用同一结算意图；不重复叠加旧内核计数 |
 | 目标写入部分文件后断开 SSH | 源保持冻结；resume 完成同一事务，没有重复节点 |
 | 目标 READY 后进程退出 | 重试启动/验证，不重新导入余额 |
+| READY 中部分节点自然到期，原 ExecStopPost/GC 删除文件后重启 | 从源 resume；只恢复存活节点当前余额；到期节点不补文件/延长/重建限速，verify 报 expired |
+| READY 中全部节点自然到期且文件已删除 | 可完成空存活集验证；不启动或重建任何到期节点 |
+| READY 中未到期节点的必要文件缺失，或到期端口仍有监听 | 明确拒绝并保留屏障；不能以“到期清理”掩盖有效节点丢失或残留进程 |
+| READY 重置已写入持久文件，恢复中断再重试 | 从目标当前 NEXT_RESET/余额继续；不得按旧快照再发配额 |
 | 目标已写 OPEN，但回复在网络中丢失 | 源 OPEN_UNCERTAIN；resume 查询并完成，不能 abort 旧余额 |
 | OPEN 后再发送旧 stage 请求 | 明确拒绝；目标新增用量保持 |
 | 源/目标在维护中重启 | 屏障/门禁不放行双份余额；计数无依据时失败关闭 |
 | OPEN 前执行 abort | 先证明目标作废并停止监听，再恢复源最终余额 |
+| 源已 RESUMED，分别在放行前、放行且已有新增流量后中断 | resume 仅本机收尾；不需要目标 SSH；持久用量及实时计数不得回退/清零 |
+| RESUMED 后原 GC 清理部分/全部到期节点，再 resume | 正确跳过已到期且无服务/监听节点；存活节点仍完整验证 |
+| RESUMED 重试时未到期节点的 live quota/counter 缺失 | 停止，不以旧快照或假零计数恢复 |
+| watchdog 持 temp.lock 等 restart，同时触发迁入节点 gate | 无父子死锁；gate 取得后续防护锁；失败不能关闭原锁或绕过门禁 |
+| GC/quota save/reset 与 verify/RESUMED 收尾并发 | 原生锁覆盖元数据读取及防护验证，不能读到半套状态；systemctl start 在锁外 |
+| 节点在验证到启动的间隙到期 | 门禁/原 timeout 遵守原期限；重试不得延期或复活 |
 | OPEN 后执行 abort | 拒绝；必须基于目标新状态迁移 |
 
 ## 反向和多轮

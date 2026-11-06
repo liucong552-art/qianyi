@@ -4,7 +4,7 @@
 
 **当前是待真实 VPS 验收的实现版本。** 已有可运行代码和本地自动化测试；没有在你的两台 VPS 上运行过，不能把本地测试通过理解为生产验收完成。首次先按 [VPS 验收清单](docs/VPS_ACCEPTANCE.md) 在测试节点/测试服务器演练。实时进度保存在 [PROGRESS.md](PROGRESS.md)，源码依据在 [SOURCE_AUDIT.md](docs/SOURCE_AUDIT.md)。
 
-**当前已暂停并保存供接手。** 58 项单元测试、原生 nft/quota/IP/portbw/tc 测试通过，但新增 Reality 认证烟测仍失败，尚有到期恢复边界待检查，不能用于生产交接。详见 [PROGRESS.md](PROGRESS.md) 和 [接手说明](docs/HANDOFF.md)。此前 watchdog 的 temp.lock 等待问题已修复并有实际文件锁回归测试。
+**接续修复已完成，仍待真实 VPS 验收。** 73 项本地测试通过；提交 `9f026cd` 的 [完整 CI](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已通过原生 nft/quota/IP/portbw/tc 和固定 Xray Reality 烟测。已修复 TLS 测试夹具、READY 到期文件缺失及 RESUMED 收尾锁边界。烟测保留普通/NAT 原链接和独立密钥，但不运行完整迁移 CLI、systemd、SSH 或真实 WG。测试证据见 [TESTING.md](docs/TESTING.md)，最新检查点见 [PROGRESS.md](PROGRESS.md) 和 [接手说明](docs/HANDOFF.md)。
 
 ## 保留什么
 
@@ -121,18 +121,18 @@ python3 /usr/local/lib/qianyi/agent.py status
 python3 /usr/local/lib/qianyi/agent.py resume 事务编号
 ```
 
-`resume` 重新认证 SSH，然后从持久状态继续。已经完成结算的事务复用同一份已封存快照；这个源机此时被持久冻结，没有新用户流量，所以不构成旧状态覆盖。下一轮生产迁移必须用新的事务和最新状态。
+`resume` 从持久状态继续。需要远端动作的阶段会重新认证 SSH；RESUMED / RETIRED 只在本机收尾，不依赖目标仍可 SSH。已经完成结算且尚未恢复服务的源事务复用同一份已封存快照；这个源机此时被持久冻结，没有新用户流量，所以不构成旧状态覆盖。下一轮生产迁移必须用新的事务和最新状态。
 
 | 状态 | 含义和操作 |
 |---|---|
 | PREPARED | 源仍在线；可 cutover，或 abort 取消准备 |
 | FREEZING | 正在冻结/结算或该阶段失败；源可能已暂停，先看错误，再 resume |
 | SEALED / TRANSFERRING | 源已冻结且快照持久化；修复明确问题后 resume |
-| READY（目标） | 已恢复并在屏障内验证；尚未开放，可安全重试或协调撤销 |
+| READY（目标） | 尚未开放；重启后用目标当前持久余额恢复防护；已到期且无监听的节点可缺文件，不重建/延期；未到期缺文件仍拒绝 |
 | OPEN_UNCERTAIN（源） | 已请求开放但确认未收齐；目标可能已经产生新流量，只能查询/继续，禁止旧余额回退 |
 | OPEN（目标）/ RETIRED（源） | 目标接管；只能以目标最新状态发起下一轮迁移 |
 | ABORTED | 该目标事务永久作废，不允许旧包再次开放 |
-| RESUMED | 目标确认撤销后，源按结算余额恢复 |
+| RESUMED | 已取得目标撤销证明；可能已有新用量。resume 只校验当前状态、启动存活节点并收尾，绝不重放旧余额 |
 
 目标尚未开放且确需取消时，在源机执行：
 
@@ -143,6 +143,8 @@ python3 /usr/local/lib/qianyi/agent.py abort 事务编号
 工具必须通过 SSH 得到目标已撤销并停止监听的确认，才能恢复源节点。目标无法联系时不会冒险恢复源。目标已 OPEN 或开放结果不确定时拒绝旧余额回退；若目标已承载流量，应保留目标数据、修复其环境，或从它重新生成最新快照迁向一个满足空备用机预检的目标。
 
 撤销后的目标可能保留部分导入和隔离状态，供恢复调查；不会自动覆盖/抹除它。重用前需按 [恢复说明](docs/RECOVERY.md) 处理或由你重装该空备用机。
+
+READY / RESUMED 中节点自然到期并被原 GC/ExecStopPost 删除时，不要手工补回 JSON、URL、配额文件或修改到期时间。修复明确报错后从源机 `resume 事务编号`。工具只在确认已到期服务停止且端口无监听时排除该节点；未到期文件缺失、残留监听或实时计数缺失仍会报错。目标 READY/OPEN 的 `verify` 中，`nodes` / `expired` 分别报告本轮存活/到期数量，原快照摘要保持不变。RESUMED 在源机使用 status/resume；不要对已 ABORTED 的目标执行 verify 来判断源机恢复。
 
 ## 安全与运行边界
 
@@ -158,9 +160,11 @@ python3 /usr/local/lib/qianyi/agent.py abort 事务编号
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile qianyi.py tools/build_profile.py
+python3 -m py_compile qianyi.py tools/build_profile.py tests/reality_smoke.py tests/tls_target.py
 python3 qianyi.py build /root/qianyi-standalone.py
 python3 /root/qianyi-standalone.py --help
 ```
 
 生成的 standalone 含固定兼容性清单，可单文件使用。实际安装时工具也会生成同样的独立文件。`tools/build_profile.py 上游源码目录` 只提取 heredoc 和计算 SHA，不执行上游安装器；改变适配版本仍需要先完成源码审计及相应测试。
+
+`tests/nft_kernel.py`、`tests/native_portbw.py`、`tests/reality_smoke.py` 会操作测试环境的网络/文件，只能按 [workflow](.github/workflows/tests.yml) 在一次性隔离容器运行，不能直接在生产 VPS 执行。系统调用夹具、真实文件锁测试及容器烟测的边界见 [TESTING.md](docs/TESTING.md)。

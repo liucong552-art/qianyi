@@ -149,6 +149,9 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as lifet
                 servers.enter_context(serve(n,name));connect(url)
             if name == 'target':
                 connect(original[0],wrong_key=future['meta']['PBK'])
+                # A negative result is meaningful only while the same server
+                # still authenticates its genuine unchanged URL afterwards.
+                connect(original[0])
                 servers.enter_context(serve(future,name));connect(future['url'])
                 nodes.append(future);original.append(future['url'])
     assert len({n['meta']['PBK'] for n in nodes}) == 3

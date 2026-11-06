@@ -1,6 +1,6 @@
 # 接手说明：以本仓库为准，不依赖原聊天或临时工作目录
 
-更新时间：2026-11-06（北京时间）。用户因额度不足要求立即暂停并保存，允许其他 AI 接手。不要把当前版本宣称为已完成生产验收。
+更新时间：2026-11-06（北京时间）。已从 `fdb6d86` 接手并分阶段继续提交。下面是最新交接状态；原失败证据仍保留。不要把当前版本宣称为已完成生产验收。
 
 ## 最先阅读
 
@@ -14,31 +14,26 @@
 
 ## 当前结果：务必区分
 
-- 迁移程序已经实现，非伪代码。尚未在真实 VPS 执行；未取得用户服务器登录信息。
-- 58 项本地 unittest 已通过；最近 GitHub unit job 也通过。
-- Debian 13.7 / nftables 1.1.3 容器中，真实上游 quota/IP 库的恢复、TCP 计量、结算、耗尽规则、暂停、CIDR、迁移屏障已通过。
-- 同一隔离容器中，真实 portbw + nft/tc 恢复、静态上下载限速配置、自动 hold/cooldown、最近确认拥塞的期限、tc 槽位重试、保留原 443 策略/root qdisc 已通过。这不等于真实公网速率测试。
-- **新增真实 Xray 认证烟测仍失败，整体 CI 目前为失败。** 最近代码提交 943bd3eeab374003da42d7b49e60dc37692a4ac1；运行 https://github.com/liucong552-art/qianyi/actions/runs/42233920479 。失败在 tests/reality_smoke.py 首个原链接连接，curl 退出码 28。此前两个原生脚本已成功。
-- 最新失败日志的相关片段保存在 docs/CI_LAST_FAILURE.txt；全部来自合成测试，已过滤密钥相关诊断行。不要将这项失败掩盖或删掉断言来让 CI 变绿。
+- 迁移程序沿用已有实现，未从头重写。未取得用户 VPS 登录信息，没有操作真实用户节点或上传真实凭据/快照。
+- **Reality 烟测已修复并通过。** 阶段 1 `f1ac316`：[CI 42236445140](https://github.com/liucong552-art/qianyi/actions/runs/42236445140)。串行 TLS 目标与新版 freedom 对回环 HTTP 的拦截是两个独立原因，证据与固定官方源码链接见 [TESTING.md](TESTING.md)。旧失败 42233920479 及 CI_LAST_FAILURE.txt 为历史记录。
+- **READY/RESUMED 到期与锁修复已提交。** 阶段 2 `9f026cd`：[CI 42237634038](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 全部成功。本地 73 项 unittest 通过；其中 14 项新增到期/恢复/真实 flock 回归，systemd/nft 调用仍是夹具。
+- Debian 13 隔离容器中的真实上游 quota/IP/nft、portbw/nft/tc、固定 Xray v26.10.31 原 URL/独立密钥/错误公钥/新增节点多轮烟测均通过。这些脚本未执行完整迁移 CLI、SSH、systemd 重启或真实 WG。
+- 本轮文档整理同时加强了两处既有断言：RESUMED 回归直接调用真实 verify_protection 逻辑（输入为受控 nft 夹具）；错误公钥拒绝后立即再测同一服务的正确原 URL。其最终 CI 结果以 PROGRESS.md / main 最新提交为准。
+- **仍未完成真实 VPS 验收。** 不得据容器烟测声称公网原链接、WG 出站、正常重启、掉线恢复、双向多轮交接已经验收。
 
 ## 下一步按顺序做
 
-1. 诊断并解决 Reality 烟测失败。先判断是隔离 TLS 测试目标、测试配置还是认证数据的问题，不能未经证据认定迁移代码或测试环境哪一方有错。烟测不执行完整迁移 CLI，也没有真实 WG。
-2. 复核 recover_ready() 的到期边界：它当前读取快照所有节点文件；READY 后节点自然到期且原 ExecStopPost 已清理文件，再重启恢复时，可能因已到期节点文件缺失而停住。应遵循原到期规则，不能为了通过恢复而重建/延期已到期节点。这是暂停前发现的**待验证风险，尚未修复或增加测试**。
-3. 复核 finish_source_resume()：已在 RESUMED 时禁止旧快照重放，并移除本机收尾对 SSH 的依赖；但 verify_protection 当前没有在此函数内持有原生锁，而且对已过期/被原 GC 删除节点的处理需补查。RESUMED 可能已经产生新流量，只能使用当前持久/内核状态，不能恢复旧余额。
-4. 完成最终代码复核、针对上述发现的故障回归及中文文档更新。可增加 systemd/SSH 的隔离集成测试；不要把模拟调用当作两台真实 VPS 验收。
-5. 按 VPS_ACCEPTANCE.md 明确列出仍待真实 VPS 的项目。没有 VPS 信息时不要凭空宣称普通/NAT 外部原链接、WG 出站和完整重启验收已通过。
-6. 每阶段提交 GitHub，并更新 PROGRESS.md 的实际结果和未完成事项。最终交付也要给出明确的测试边界。
+1. 核对 main 最新提交与 CI，先读 PROGRESS.md。不要重复修复已完成的 Reality/READY/RESUMED 项；新增发现须记录具体复现与影响。
+2. 在两台有授权的测试 Debian 13 VPS 和外部客户端按 [VPS_ACCEPTANCE.md](VPS_ACCEPTANCE.md) 演练完整 CLI、SSH、systemd、普通/NAT 原链接及 WG。没有实际环境时这项保持未执行。
+3. 重点执行 READY 自然到期/原 GC 删除后重启（部分及全部节点）、RESUMED 已有新增流量后中断重试、真实 watchdog→systemctl restart→gate 锁路径。保留 443/WG 摘要；不重放旧余额。
+4. 验收结果按用例填写程序提交、环境版本、实际/预期和时间，只保存脱敏摘要。每个后续阶段提交本仓库并更新 PROGRESS.md；真实用户凭据、私钥、快照、服务器日志不得上传。
 
-## Reality 测试现场
+## Reality 夹具与边界
 
-- tests/reality_smoke.py 在一次性 Debian 容器运行；用本地 OpenSSL s_server 作为 TLS 目标，Python HTTP 服务作为实际代理访问目标。
-- 官方 Xray v26.10.31；ZIP SHA-256 固定为 e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214，下载和校验步骤已在 workflow 中。
-- 使用 node() 产生的公开合成凭据，普通/NAT 两个节点、第三个后增节点，三个不同 Reality 密钥。准备覆盖替换进程后的原 URL、业务域名仅解析覆盖、错误公钥拒绝、多轮新增节点。
-- NAT 配置保留 sockopt.mark，但测试没有 WireGuard；不能把它称作 WG 出站测试。
-- 已尝试限制 OpenSSL TLS 目标为 X25519，并开启合成测试的调试日志；仍失败。Xray 自身 x25519 推导的公钥与 OpenSSL 推导已交叉核对，断言通过。
-- 日志显示客户端开始拨号业务域名，服务端/本地 TLS 目标出现 bad certificate、unexpected CCS 等消息；根因尚未确认。
-- 官方 Xray 配置来源可查看 XTLS/Xray-core 的 v26.10.31 / infra/conf/transport_security.go，包含 REALITYConfig 的 publicKey/password/dest/target 等解析；不要盲猜新版字段。
+- 固定官方 Xray v26.10.31，ZIP SHA-256：`e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214`。没有改变版本来绕开旧失败。
+- `tests/tls_target.py` 在每个连接线程完成 TLS 1.3 握手，支持 Xray 的并发 ALPN/CCS 探测。`test_reality_fixture.py` 用真实 TLS socket 验证未完成握手不会阻塞下一客户端。
+- `reality_smoke.py` 只在一次性容器执行。HTTP 目标地址 `93.184.216.34/32` 绑定在该 netns 的 lo，先断言 local 路由，不访问公网。业务域名只通过容器 hosts 覆盖；保留节点原链接和 freedom/NAT 出站配置。
+- 三个公开合成节点使用三套独立 Reality 密钥；普通与带 mark NAT 认证测试均通过，**带 mark 不等于 WG 出站**。`show=false` 避免输出派生握手材料。
 
 ## 代码导航
 
@@ -50,10 +45,11 @@
 | probe / check_profile | 只读检查 Debian 13、root、时钟、精确安装产物、目标为空、端口、未知残留、Xray 版本、WG 元组与路由；不修复 WG |
 | freeze | 重读最新状态；协调 timers/workers，持原锁；清空迁移期间 ExecStopPost、加端口屏障、停源；settlement.json 在任何计数重建前落盘，随后 snapshot.json / SEALED |
 | target_stage / import_write | 目标屏障内写前归属日志；restore-intent.json 固定导入重置时刻；先配额/IP/ban/portbw，再启监听；READY 重试不直接重放导入 |
-| recover_ready | 仅用于从未 OPEN 的目标重启恢复；读目标当前持久余额，不用源旧余额覆盖；到期缺失文件边界尚待检查 |
+| recover_ready | 仅从未 OPEN 的目标重启恢复；锁内读目标当前持久余额；到期且已停止的节点不重建文件/限速，未到期缺文件拒绝 |
 | target_open / worker | 先落盘 OPEN，再去屏障；源请求前记 OPEN_UNCERTAIN；回复丢失先查询，OPEN 后拒绝旧 stage/abort |
 | retire_source | 源继续屏障，原文件归档到私有 originals/；保留源快照，不自动重装 |
-| source_abort / finish_source_resume | 先获得目标永久 ABORTED 且无监听的证明，才能恢复源；RESUMED 收尾不能重新结算/导入旧快照 |
+| source_abort / finish_source_resume | 先获得目标永久 ABORTED 且无监听的证明；RESUMED 在原生锁内读/验当前状态，锁外启动，二次验证后收尾；不重放快照 |
+| current_nodes / verify_target | 在原生锁内读当前存活节点，核对原身份/期限/JSON/URL/unit；到期节点须无服务及监听；不补缺失文件 |
 | gate | 原 watchdog 持 temp.lock 等 systemctl restart；gate 现已改为只取得 LOCKS[1:]，避免父子死锁；有实际文件锁回归测试 |
 | boot_restore | 恢复迁移屏障和暂停；重定基自动限速时钟；核对当前原生 blacklist 恢复结果，避免恢复失败放行；不从旧快照重新封禁已被合法解除的 IP |
 | rebase_bandwidth / install_bandwidth | 不复制源网卡/TC 槽位；目标自行分配；保留策略、当前速度及 hold/cooldown，先结算 last_busy_at + hold 再跨机转换截止时间 |

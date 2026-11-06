@@ -21,9 +21,17 @@
 - READY 重启恢复跳过已到期节点的文件、quota/IP 和限速重建；原生 GC 删除 unit 时不因 stop 返回失败直接中断，但必须确认服务停止、无残留监听。所有未到期节点仍要求完整当前文件，禁止从快照补回缺失凭据/余额。
 - 新增 current_nodes：在原生锁内读取当前元数据，核对原身份/期限与 JSON/URL/unit，沿用当前持久余额及 IP 配置。已到期节点仅在无活动服务/监听时排除；不延长期限。
 - RESUMED 前后两次持 temp→quota→IP→portbw→blacklist 锁读取与验证；中间释放锁再调用 systemd start，避免父进程等待门禁子进程。收尾不恢复旧配额、限制或限速，不重新依赖 SSH；丢失实时计数则拒绝而非清零。
-- verify_target 的读取与验证进入同一原生锁边界。撤销源时不再为到期节点恢复旧防护文件。
+- verify_target 的读取与验证进入同一原生锁边界。撤销后的防护恢复步骤跳过到期节点；冻结结算步骤仍保留其审计数据。
 - 本地 **73 项 unittest 通过**，Python 编译、diff whitespace 检查通过。新增 14 项到期/故障/真实 flock 回归；systemd/nft 仍为夹具，不能称为系统集成验收。
-- 本阶段完整 CI 待提交后确认；下一阶段复核代码、更新 README/HANDOFF/恢复说明及待真实 VPS 清单。旧失败证据 docs/CI_LAST_FAILURE.txt 保留。
+- 阶段 2 提交 `9f026cd` 的 [完整 CI 42237634038](https://github.com/liucong552-art/qianyi/actions/runs/42237634038) 已确认 unit、debian13-nft 两项均成功。旧失败证据 docs/CI_LAST_FAILURE.txt 保留。
+
+### 阶段 3：复核、操作与交接文档
+
+- 更新 README、HANDOFF、RECOVERY、VPS_ACCEPTANCE、SOURCE_AUDIT、TESTING，移除过时的“仍暂停/Reality 失败/RESUMED 需 SSH”现状描述；保留旧失败原文作为历史。
+- 写明 READY / RESUMED 自然到期、文件缺失、残留监听、锁等待的操作与停止条件；真实 VPS 清单增加部分/全部到期、重置中断、收尾前后新增流量、watchdog restart/gate 锁与 GC/save/reset 并发验证。
+- 代码复核确认：READY 仅未 OPEN 可恢复，RESUMED 不调用旧快照恢复；metadata/防护读验同锁，systemd start 在锁外；原身份、期限、链接和独立凭据继续校验。443/WG 的摘要保护及固定兼容清单未改变。
+- 增强现有回归：70 GiB 持久 + 3 GiB 实时用量场景直接执行 verify_protection；错误公钥拒绝后立即用同一服务正确原 URL 重连，避免把服务异常误判为拒绝认证。
+- 本地 73 项测试、Python 编译、standalone 构建/帮助、diff 检查通过；固定上游 7 个源文件 SHA-256 与 39 个产物清单核对一致，未运行安装器。此阶段新的完整 CI 待提交后确认。
 
 ## 之前的开发记录（历史，非当前验收结论）
 
@@ -49,21 +57,18 @@
 
 先阅读本文件、README.md 和 docs/SOURCE_AUDIT.md，查看最近提交、运行测试，再从未完成项继续。真实用户快照、凭据和私钥永不进入本仓库。每个阶段将更新此文件并提交。
 
-## 待完成
+## 待完成（当前）
 
-1. gate 锁修复已完成，使用实际文件锁的回归测试通过；继续核对 CI 与完整 systemd 行为。
-2. 继续复查 READY/RESUMED 的中断恢复；RESUMED 可能已经产生新流量，重试只能收尾，不能重新恢复旧快照。launch 对 RESUMED 仍会要求目标 SSH，可改为本机收尾；不要误把它当成新的迁移。
-3. IP 防护已补齐完整表达式核对；后续继续检查黑名单与重启保护边界。
-4. 已在目标启动后及源退休/撤销恢复后调用原生订阅刷新，继承持锁标志，避免另起 systemd 子任务造成锁等待。
-5. 最后一轮实现审查、更新 README/恢复说明及测试记录。README 状态仍应标为待真实 VPS 验收。
-6. 按 docs/VPS_ACCEPTANCE.md 在两台测试 VPS 完成 Reality 实连、WG、systemd 启停/重启、掉线/重试、反向多轮验收；此项需要真实环境，未执行。
+1. 本轮最后测试增强及文档提交后的完整 CI 确认，并将最终证据保存到本文件。
+2. 两台测试 Debian 13 VPS + 外部客户端执行完整 CLI / SSH / systemd / WG / 公网原链接验收。尚无真实 VPS 信息，此项未执行。
+3. 按 docs/VPS_ACCEPTANCE.md 重点测试真实 watchdog/gate 与 GC/save/reset 锁调度、READY 自然到期清理后重启、RESUMED 已有新增用量后收尾、多轮双向迁移；每项记录实际结果，不用模拟结果替代。
 
 ## 已保存的实现与测试边界
 
 - `qianyi.py`：Python 标准库 CLI，preflight/prepare/migrate/cutover/resume/abort/status/verify/confirm；root SSH 控制连接、systemd 后台 worker、持久事务、源最终结算 WAL、目标导入 WAL、端口屏障、保护恢复、源归档。
 - `compatibility.json` / `tools/build_profile.py`：固定上游提交的 39 个产物哈希与两种 unit 模板；只解析源码，不运行安装器。
-- `tests/test_qianyi.py`：48 项本地测试实际通过；真实 OpenSSL 推导合成 Reality 公钥，其他系统行为使用受控夹具/故障注入。
-- `tests/nft_kernel.py` / `.github/workflows/tests.yml`：在隔离容器调用真实上游 quota/IP 库和 nft 内核，不测试 Xray Reality 实连、WG 或完整 systemd 重启。
+- `tests/test_qianyi.py` / `tests/test_recovery.py` / `tests/test_reality_fixture.py`：合计 73 项本地测试通过；真实 OpenSSL 公钥推导、TLS sockets、flock；systemd/nft 恢复路径使用受控夹具/故障注入。
+- `tests/nft_kernel.py` / `tests/native_portbw.py` / `tests/reality_smoke.py` / workflow：隔离容器内执行真实 quota/IP/nft、portbw/tc、Xray Reality 认证；不测试完整 CLI、WG、SSH 或 systemd 重启。
 - `docs/SOURCE_AUDIT.md`、`README.md`、`docs/RECOVERY.md`、`docs/VPS_ACCEPTANCE.md`：源码依据、中文操作、失败恢复、待执行验收。
 - 上游固定为 `3e1972393cd9e6f097b27b76f919a649def61ae4`，以后继续先检查当前仓库进度；不能直接用移动的 upstream main 替换兼容清单。
 - 没有用户服务器登录凭据，没有接触生产节点；仓库不含真实用户快照或私钥。

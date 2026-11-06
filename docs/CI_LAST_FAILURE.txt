@@ -1,3 +1,6 @@
+Historical failure, resolved by f1ac316. Passing synthetic CI: https://github.com/liucong552-art/qianyi/actions/runs/42236445140
+This retained excerpt is not the current CI status; see PROGRESS.md and TESTING.md.
+
 Source: https://github.com/liucong552-art/qianyi/actions/runs/42233920479
 Commit: 943bd3eeab374003da42d7b49e60dc37692a4ac1
 Only synthetic disposable-container diagnostics. Key-related diagnostic lines omitted.
