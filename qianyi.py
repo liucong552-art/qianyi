@@ -148,7 +148,7 @@ def metadata(data):
 
 def env_bytes(m):
     need(all('\n' not in str(v) and '\r' not in str(v) for v in m.values()), '元数据值包含换行')
-    return ''.join(f'{k}={v}\n' for k, v in m.items()).encode()
+    return ''.join(f'{k}={m[k]}\n' for k in sorted(m)).encode()
 
 
 def uint(value, name='数字', maximum=2**63-1):
@@ -585,7 +585,7 @@ def extract_restrictions(rows, ports):
                  and set(map(str,proto.get('right',{}).get('set',[]))) in ({'tcp','udp'},{'6','17'})
                  and port_match.get('op') == '==' and port_match.get('right') == p
                  and port_match.get('left') in ({'payload':{'protocol':'th','field':'dport'}},
-                                                {'payload':{'base':'transport header','offset':2,'len':2}}),
+                                                {'payload':{'base':'th','offset':16,'len':16}}),
                  'CIDR 黑名单协议/端口不匹配')
             if p in result:
                 result[p]['bans'].append(network)
@@ -1161,6 +1161,7 @@ def target_stage(snap):
     need(s['role'] == 'target' and s['phase'] in ('PREPARED','STAGING','READY'), '目标已开放、撤销或处于未知状态；禁止旧快照覆盖')
     validate_snapshot(snap,s)
     if s['phase'] == 'READY':
+        recover_ready(sid, snap)
         start_target_nodes(snap)
         verify_target(sid)
         return {'phase':'READY','snapshot_sha':s['snapshot_sha']}
@@ -1175,7 +1176,19 @@ def target_stage(snap):
         stop_bandwidth_worker()
         sync_fence()
         check_preserved(s['protected'])
-        for n in snap['nodes']:
+        # A durable, deterministic restore intent avoids two different wall-clock
+        # reset timestamps being written on either side of an interrupted import.
+        intent_path=session_path(sid)/'restore-intent.json'
+        if intent_path.exists():
+            restored=read_json(intent_path)
+        else:
+            restored=copy.deepcopy(snap['nodes'])
+            now=int(time.time())
+            for n in restored:
+                if n.get('quota'):
+                    n['quota']=apply_due(n['quota'],now)
+            save(intent_path,restored)
+        for n in restored:
             m=n['meta']; paths=node_paths(m['TAG'],m['PORT'])
             check_wg(m)
             import_write(sid,paths['meta'],env_bytes(m))
@@ -1183,20 +1196,52 @@ def target_stage(snap):
                 import_write(sid,paths[k],n[k].encode(),0o644 if k == 'unit' else 0o600)
             for k in ('quota','iplimit'):
                 if n.get(k):
-                    record=apply_due(n[k],int(time.time())) if k == 'quota' else n[k]
-                    import_write(sid,paths[k],env_bytes(record))
+                    import_write(sid,paths[k],env_bytes(n[k]))
             output(['/usr/local/bin/xray','run','-test','-config',paths['config']])
             output(['systemd-analyze','verify',paths['unit']])
-        restore_quota_ip(snap['nodes'],due=True)
+        restore_quota_ip(restored)
         apply_restrictions(snap['nodes'])
         install_bandwidth(snap)
         verify_protection(snap['nodes'])
         check_preserved(s['protected'])
-        update_session(sid,phase='READY')
+        update_session(sid,phase='READY',ready_boot=boot_id())
     # The gate takes quota/IP locks itself; never start systemd nodes under them.
     start_target_nodes(snap)
     verify_target(sid)
     return {'phase':'READY','snapshot_sha':digest(encoded(snap))}
+
+
+def recover_ready(sid, snap):
+    """Only a never-opened target may rebuild lost kernel objects after reboot."""
+    s=session(sid)
+    need(s['phase'] == 'READY', '只有尚未开放的目标可以恢复准备阶段')
+    if s.get('ready_boot') == boot_id():
+        return
+    pause_workers(sid)
+    hold_nodes(sid,snap['nodes'])
+    with locks():
+        stop_bandwidth_worker()
+        sync_fence()
+        for n in snap['nodes']:
+            systemctl('stop',n['meta']['TAG']+'.service')
+        need(not (listening() & {int(n['meta']['PORT']) for n in snap['nodes']}), '准备恢复时目标仍有监听')
+        # Read current persistent balances (including a reset already applied
+        # before the reboot), never overwrite them with the source's old values.
+        current=copy.deepcopy(snap['nodes'])
+        for n in current:
+            paths=node_paths(n['meta']['TAG'],n['meta']['PORT'])
+            for key in ('config','url','unit'):
+                need(regular(paths[key]).decode() == n[key], '重启后准备配置被修改')
+            for key in ('meta','quota','iplimit'):
+                raw=regular(paths[key],key == 'meta' or n.get(key) is not None)
+                n[key]=metadata(raw) if raw else None
+            validate_node(n)
+        restore_quota_ip(current,due=True)
+        apply_restrictions(current)
+        install_bandwidth(snap)
+        verify_protection(current)
+        check_preserved(s['protected'])
+        update_session(sid,ready_boot=boot_id())
 
 
 def start_target_nodes(snap):
@@ -1208,6 +1253,10 @@ def start_target_nodes(snap):
         unit=n['meta']['TAG']+'.service'
         systemctl('enable',unit)
         systemctl('start',unit)
+        deadline=time.monotonic()+15
+        while int(n['meta']['PORT']) not in listening():
+            need(active(unit) == 'active' and time.monotonic() < deadline, '目标节点未在期限内开始监听')
+            time.sleep(.1)
 
 
 def verify_target(sid):
@@ -1249,6 +1298,9 @@ def target_open(sid):
     s=session(sid)
     need(s['phase'] in ('READY','OPEN'), '目标未就绪或已撤销')
     if s['phase'] == 'READY':
+        snap=read_json(session_path(sid)/'snapshot.json')
+        recover_ready(sid,snap)
+        start_target_nodes(snap)
         verify_target(sid)
         # This is the irreversible commit point. A lost response MUST NOT make
         # the source resume. Retry only removes fences/resumes tasks, never imports.
@@ -1324,10 +1376,19 @@ def source_abort(sid):
     snap=freeze(sid)
     with locks():
         restore_quota_ip(snap['nodes'],due=True)
+        apply_restrictions(snap['nodes'])
         verify_protection(snap['nodes'])
     update_session(sid,phase='RESUMED')
-    release_nodes(snap['nodes'])
-    for n in snap['nodes']:
+    finish_source_resume(sid)
+
+
+def finish_source_resume(sid):
+    s=session(sid)
+    need(s['phase'] == 'RESUMED', '源机尚未取得安全恢复状态')
+    # This phase may already have served new traffic: never replay the snapshot.
+    verify_protection(s['nodes'])
+    release_nodes(s['nodes'])
+    for n in s['nodes']:
         if int(n['meta']['EXPIRE_EPOCH']) > time.time() and not n['disabled']:
             systemctl('start',n['meta']['TAG']+'.service')
     sync_fence()
@@ -1486,6 +1547,10 @@ def worker(sid):
         with locks(['/run/qianyi-transaction.lock']):
             s=session(sid)
             need(s['role'] == 'source', '必须在当前源机执行')
+            if s['phase'] == 'RESUMED':
+                finish_source_resume(sid)
+                update_session(sid,last_error='')
+                return
             if s['phase'] == 'PREPARING':
                 fresh=probe('source')
                 result=remote(s['ssh'],'prepare',{'sid':sid,'manifest':fresh})
@@ -1526,7 +1591,7 @@ def worker(sid):
 
 def launch(sid):
     s=session(sid)
-    need(s['role'] == 'source' and s['phase'] not in ('ABORTED','RESUMED'), '该事务不允许交接/重试')
+    need(s['role'] == 'source' and s['phase'] != 'ABORTED', '该事务不允许交接/重试')
     control=Path('/run/qianyi')
     control.mkdir(mode=0o700,exist_ok=True)
     need(control.stat().st_uid == 0 and not control.stat().st_mode & 0o077 and not control.is_symlink(), 'SSH 控制目录权限不安全')

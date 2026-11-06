@@ -19,6 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the exact audited upstream revision
+        uses: actions/checkout@v4
+        with:
+          repository: liucong552-art/jieshu
+          ref: 3e1972393cd9e6f097b27b76f919a649def61ae4
+          path: audited-upstream
       - name: Native nftables in isolated Debian 13 container
         run: |
           docker run --rm --cap-add NET_ADMIN \

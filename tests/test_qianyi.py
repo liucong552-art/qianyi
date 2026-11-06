@@ -207,6 +207,7 @@ class DataTests(unittest.TestCase):
 
 class DurableTests(unittest.TestCase):
     def setUp(self):
+        boot=patch.object(q,'boot_id',return_value='test-current-boot');boot.start();self.addCleanup(boot.stop)
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.state=Path(self.tmp.name)/'state'
         p=patch.object(q,'STATE',self.state);p.start();self.addCleanup(p.stop)
@@ -237,10 +238,11 @@ class DurableTests(unittest.TestCase):
 
     def test_open_records_commit_before_removing_fence(self):
         self.init(role='target',phase='READY',snapshot_sha='hash')
+        q.save(q.session_path(SID)/'snapshot.json',{'nodes':[node()]})
         def fail():
             self.assertEqual(q.session(SID)['phase'],'OPEN')
             raise q.Error('simulated lost connection')
-        with patch.object(q,'verify_target'),patch.object(q,'sync_fence',side_effect=fail):
+        with patch.object(q,'verify_target'),patch.object(q,'recover_ready'),patch.object(q,'start_target_nodes'),patch.object(q,'sync_fence',side_effect=fail):
             with self.assertRaises(q.Error):q.target_open(SID)
         with patch.object(q,'verify_target') as verify,patch.object(q,'sync_fence'),patch.object(q,'resume_workers'),patch.object(q,'machine_id',return_value='target'):
             self.assertEqual(q.target_open(SID)['phase'],'OPEN')
@@ -284,7 +286,7 @@ class DurableTests(unittest.TestCase):
             with self.assertRaises(q.Error):q.validate_snapshot(snap,s)
 
     def test_ready_retry_starts_services_without_reimport(self):
-        s=self.init(role='target',phase='READY',snapshot_sha='hash')
+        s=self.init(role='target',phase='READY',snapshot_sha='hash',ready_boot=q.boot_id())
         with patch.object(q,'validate_snapshot'),patch.object(q,'start_target_nodes') as start,patch.object(q,'verify_target'),patch.object(q,'restore_quota_ip') as restore:
             self.assertEqual(q.target_stage({'sid':SID})['phase'],'READY')
             start.assert_called_once();restore.assert_not_called()
@@ -307,6 +309,23 @@ class DurableTests(unittest.TestCase):
         p=Path(self.tmp.name)/'no'/'lock'
         with q.locks([str(p)],readonly=True):pass
         self.assertFalse(p.parent.exists())
+
+    def test_ready_recovery_is_forbidden_after_open(self):
+        self.init(role='target',phase='OPEN',ready_boot='old')
+        with patch.object(q,'restore_quota_ip') as restore:
+            with self.assertRaises(q.Error):q.recover_ready(SID,{'nodes':[node()]})
+            restore.assert_not_called()
+
+    def test_resumed_source_retry_never_replays_balance(self):
+        self.init(phase='RESUMED')
+        with contextlib.ExitStack() as stack:
+            for name in ['verify_protection','release_nodes','systemctl','sync_fence','resume_workers']:
+                stack.enter_context(patch.object(q,name))
+            stack.enter_context(patch.object(q,'locks',return_value=contextlib.nullcontext()))
+            restore=stack.enter_context(patch.object(q,'restore_quota_ip'))
+            remote=stack.enter_context(patch.object(q,'remote'))
+            q.worker(SID)
+            restore.assert_not_called();remote.assert_not_called()
 
 
 class RestrictionTests(unittest.TestCase):
@@ -362,6 +381,53 @@ class RestrictionTests(unittest.TestCase):
 
 
 class OrderingTests(unittest.TestCase):
+    def setUp(self):
+        boot=patch.object(q,'boot_id',return_value='test-current-boot');boot.start();self.addCleanup(boot.stop)
+
+    def test_ready_after_reboot_uses_current_persistent_balance(self):
+        with tempfile.TemporaryDirectory() as d,contextlib.ExitStack() as stack:
+            root=Path(d);stack.enter_context(patch.object(q,'STATE',root/'state'))
+            n=node();paths={k:str(root/'files'/k) for k in ('meta','config','url','unit','quota','iplimit')}
+            current=copy.deepcopy(n);current['quota']=q.settled_quota(n['quota'],10*GIB,1500000000)
+            for k in paths:q.atomic(paths[k],q.env_bytes(current[k]) if isinstance(current[k],dict) else current[k].encode())
+            q.update_session(SID,sid=SID,role='target',phase='READY',ready_boot='previous',nodes=[n],protected={})
+            stack.enter_context(patch.object(q,'node_paths',return_value=paths))
+            stack.enter_context(patch.object(q,'locks',return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(q,'listening',return_value=set()))
+            order=[]
+            for name in ('pause_workers','hold_nodes','stop_bandwidth_worker','sync_fence','systemctl',
+                         'apply_restrictions','install_bandwidth','verify_protection','check_preserved'):
+                stack.enter_context(patch.object(q,name,side_effect=lambda *a,_n=name,**kw:order.append(_n)))
+            def restore(nodes,**kw):
+                self.assertEqual(nodes[0]['quota']['SAVED_USED_BYTES'],str(70*GIB))
+                order.append('restore')
+            stack.enter_context(patch.object(q,'restore_quota_ip',side_effect=restore))
+            q.recover_ready(SID,{'nodes':[n],'bandwidth':{}})
+            self.assertLess(order.index('sync_fence'),order.index('restore'))
+            self.assertLess(order.index('restore'),order.index('verify_protection'))
+            self.assertEqual(q.session(SID)['ready_boot'],q.boot_id())
+
+    def test_staging_reset_intent_is_stable_after_interruption(self):
+        with tempfile.TemporaryDirectory() as d,contextlib.ExitStack() as stack:
+            root=Path(d);stack.enter_context(patch.object(q,'STATE',root/'state'))
+            n=node();snap={'schema':1,'sid':SID,'source_machine':'source','target_machine':'target','nodes':[n],'bandwidth':{}}
+            paths={k:str(root/'files'/k) for k in ('meta','config','url','unit','quota','iplimit')}
+            q.update_session(SID,sid=SID,role='target',phase='PREPARED',source_machine='source',target_machine='target',nodes=[n],protected={})
+            stack.enter_context(patch.object(q,'node_paths',return_value=paths))
+            stack.enter_context(patch.object(q,'locks',side_effect=lambda *a,**kw:contextlib.nullcontext()))
+            stack.enter_context(patch.object(q,'machine_id',return_value='target'))
+            stack.enter_context(patch.object(q,'nft_rows',return_value=[]))
+            for name in ('check_empty','check_preserved','pause_workers','hold_nodes','stop_bandwidth_worker','sync_fence',
+                         'check_wg','output','apply_restrictions','install_bandwidth','verify_protection','start_target_nodes','verify_target'):
+                stack.enter_context(patch.object(q,name))
+            with patch.object(q.time,'time',return_value=1900000001),patch.object(q,'restore_quota_ip',side_effect=q.Error('interruption')):
+                with self.assertRaises(q.Error):q.target_stage(snap)
+            first=q.regular(paths['quota'])
+            with patch.object(q.time,'time',return_value=1900000005),patch.object(q,'restore_quota_ip'):
+                q.target_stage(snap)
+            self.assertEqual(first,q.regular(paths['quota']))
+            self.assertEqual(q.metadata(first)['LAST_RESET_EPOCH'],'1900000001')
+
     def test_target_protection_before_start_before_open(self):
         with tempfile.TemporaryDirectory() as d,contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(q,'STATE',Path(d)/'state'))
