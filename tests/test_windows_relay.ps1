@@ -14,13 +14,13 @@ if ($pythonHash -ne $QianyiPythonHash -or -not (Get-Content README.md -Raw).Cont
 $script:Python = (Get-Command python.exe -CommandType Application | Select-Object -First 1).Source
 $remote = Get-QianyiRemoteCommand 'import-ssh'
 $expectedArgs = @('with spaces', 'with "quotes"', 'path\', '', $remote)
-$process = Start-QianyiProcess $script:Python (@('-B', '-c', 'import json,sys; print(json.dumps(sys.argv[1:]))') + $expectedArgs) $true
+$process = Start-QianyiProcess $script:Python (@('-B', '-c', 'import json,sys; print(json.dumps(dict(arguments=sys.argv[1:])))') + $expectedArgs) $true
 try {
     $process.StandardInput.BaseStream.Dispose()
-    $actual = @($process.StandardOutput.ReadToEnd() | ConvertFrom-Json)
+    $actual = ($process.StandardOutput.ReadToEnd() | ConvertFrom-Json).arguments
     $process.WaitForExit()
     if ($process.ExitCode -ne 0 -or $actual.Count -ne $expectedArgs.Count) {
-        throw 'The native argument list has the wrong length.'
+        throw "The native argument list has $($actual.Count) entries, expected $($expectedArgs.Count), with exit code $($process.ExitCode)."
     }
     for ($i = 0; $i -lt $actual.Count; $i++) {
         if ($actual[$i] -cne $expectedArgs[$i]) { throw "Native argument $i was modified." }
