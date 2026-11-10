@@ -10,6 +10,28 @@
 - 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
 - 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
 
+### Windows 私钥登录
+
+如果你从 Windows 用 `ssh -i` 登录两台 VPS，而目标端报 `Permission denied (publickey)`，目标机可以通过当前 SSH 会话向 Windows 的代理请求认证。
+
+1. 在 Windows 以管理员身份打开 PowerShell，启动 OpenSSH 代理。
+
+   ```powershell
+   if ((Get-Service ssh-agent).StartType -eq 'Disabled') {
+       Set-Service ssh-agent -StartupType Manual
+   }
+   Start-Service ssh-agent
+   ```
+
+2. 回到你平时登录 VPS 的 PowerShell，把你原来的私钥加入代理，并用 `-A` 登录**目标机**。示例里的私钥路径、端口和目标 IP 按你的登录命令填写。
+
+   ```powershell
+   ssh-add "$env:USERPROFILE\.ssh\vps_root_ed25519"
+   ssh -A -i "$env:USERPROFILE\.ssh\vps_root_ed25519" -p 22 root@203.0.113.20
+   ```
+
+3. 在目标机运行 `ssh-add -l`。看到密钥指纹后，从源机生成新的迁移命令和令牌，再在这个目标机窗口运行。转发只用于你信任的目标机。迁移完成后退出目标机，并在 Windows PowerShell 运行 `ssh-add -d "$env:USERPROFILE\.ssh\vps_root_ed25519"`，移除这次载入代理的密钥。
+
 ## 第一步，在源机运行
 
 把下面整段原样粘贴到**源机的 root 终端**。脚本会从当前 SSH 会话读取源机地址和 SSH 端口。提示值正确时按回车即可。
