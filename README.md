@@ -7,7 +7,8 @@
 - 两台 VPS 均须已有标准的 `jieshu` 443 主节点、相同版本的 `jieshu` 管理库、Python 3.10+、systemd、nftables、`ss` 和 `curl`。源机需要 OpenSSL。
 - 默认使用目标机到源机的 root SSH 和 TCP 本地转发。源机需启用默认的 Ed25519 主机密钥，目标端需能以正常 SSH 认证连接源机。新工具不修改防火墙、安全组或 SSH 配置。
 - WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，迁入节点改用目标机的 mark、路由表和优先级。
-- 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw／暂停／来源黑名单策略，程序会在替换前停止。目标机其他端口的独立策略继续保留。
+- 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
+- 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
 
 ## 第一步，在源机运行
 
@@ -24,7 +25,7 @@
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' '1a9d40bed05f2199f46443f01354f4a467a62fd9a43a1cee10a03e23bd3d42dd' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' '4e4c7aaf4cb26e3fbced7a2caea3fe979f0bc6119e3d95add2b013866b41cf46' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```

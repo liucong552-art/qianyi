@@ -61,9 +61,9 @@ def node(tag, port, *, quota=False, iplimit=False, nat=False, label="source"):
     return q.Node(tag, port, meta, config, url, limits, slots)
 
 
-def packet(nodes, origin="a" * 64):
+def packet(nodes, origin="a" * 64, blacklist=()):
     return q.encode_json(dict(format=q.FORMAT, origin=origin, profile={"test": "profile"},
-                              nodes=[asdict(n) for n in nodes]))
+                              nodes=[asdict(n) for n in nodes], blacklist=list(blacklist)))
 
 
 class FakeHost(q.Host):
@@ -77,6 +77,8 @@ class FakeHost(q.Host):
         self.fail_publish = False
         self.foreign = {}
         self.restored_slots = []
+        self.cidr_rules = None
+        self.legacy_rules = set()
 
     @contextlib.contextmanager
     def lock(self, *_names):
@@ -93,6 +95,17 @@ class FakeHost(q.Host):
             return SimpleNamespace(stdout='[{"dev":"wg-nat"}]')
         if args[0] == "wg":
             return SimpleNamespace(stdout=f"peer\t{int(time.time())}\n")
+        if args == ("ss", "-H", "-aun"):
+            return SimpleNamespace(stdout="")
+        if args == ("nft", "-n", "list", "table", "inet", q.CIDR_TABLE):
+            return SimpleNamespace(stdout=q.extend_cidr_state(None, self.cidr_rules).decode())
+        if args == ("nft", "-n", "list", "set", "inet", "jsh_ipban", "banned"):
+            entries = ", ".join(f"{address.removesuffix('/32')} . {port}" for port, address in self.legacy_rules)
+            return SimpleNamespace(stdout=f"set banned {{ type ipv4_addr . inet_service; elements = {{ {entries} }} }}")
+        if args == ("nft", "-j", "-a", "list", "chain", "inet", q.CIDR_TABLE, "pre"):
+            values = [{"rule": {"handle": handle, "comment": f"jshcidr:{port}:{address}"}}
+                      for handle, (port, address) in enumerate(sorted(self.cidr_rules), 1)]
+            return SimpleNamespace(stdout=q.encode_json({"nftables": values}).decode())
         raise AssertionError(args)
 
     def test_config(self, value):
@@ -168,7 +181,39 @@ class FakeHost(q.Host):
         return ""
 
     def tables(self):
-        return self.fences
+        tables = set(self.fences)
+        if self.cidr_rules is not None:
+            tables.add(q.CIDR_TABLE)
+        if self.legacy_rules:
+            tables.add("jsh_ipban")
+        return tables
+
+    def nft(self, commands):
+        prefix = f"add rule inet {q.CIDR_TABLE} pre "
+        handles = dict(enumerate(sorted(self.cidr_rules or set()), 1))
+        for line in commands.splitlines():
+            if line == f"create table inet {q.CIDR_TABLE}":
+                self.assert_empty_table()
+                self.cidr_rules = set()
+            elif line.startswith(f"add chain inet {q.CIDR_TABLE} pre "):
+                continue
+            elif line.startswith(prefix):
+                address, _, port, _, _ = q.CIDR_RULE.fullmatch(line.removeprefix(prefix)).groups()
+                self.cidr_rules.add(q.ban_entry(int(port), address))
+            elif line.startswith(f"delete rule inet {q.CIDR_TABLE} pre handle "):
+                self.cidr_rules.remove(handles[int(line.split()[-1])])
+            elif line == f"delete table inet {q.CIDR_TABLE}":
+                self.cidr_rules = None
+            elif line.startswith(f"table inet {q.CIDR_TABLE} {{"):
+                self.assert_empty_table()
+                self.cidr_rules = q.cidr_entries(commands)
+                break
+            else:
+                raise AssertionError(line)
+
+    def assert_empty_table(self):
+        if self.cidr_rules is not None:
+            raise AssertionError("expected no CIDR table")
 
     def fence(self, table, ports):
         self.actions.append(("fence", *sorted(ports)))
@@ -200,6 +245,8 @@ class TransactionTests(unittest.TestCase):
         self.enterContext(patch.multiple(q, STATE=str(state), LOCK_DIR=str(run), SYSTEMD=str(systemd), XRAY_DIR=str(xray),
                                          MAIN_FILES=main, MAIN_SUB=str(root / "main.sub"),
                                          MAIN_DEFAULTS=str(root / "defaults"),
+                                         CIDR_STATE=str(root / "jsh-cidrban.nft"),
+                                         LEGACY_BAN_STATE=str(root / "jsh-ipban.nft"),
                                          JOURNAL=str(state / ".qianyi-recovery.json"), LEGACY={},
                                          permit_file=lambda table: run / f"{table}.permit"))
         def fixture_read(path, _maximum=q.MAX_STATE_FILE):
@@ -228,6 +275,16 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(list(Path(q.SYSTEMD).glob("*.service.d")))
         self.assertFalse(list(self.host.work.glob("*.permit")))
         self.assertFalse(list(Path(q.STATE).rglob("*.qianyi-new")))
+        self.assertFalse(any(q.exists(q.pending_file(path)) for path in q.blacklist_files()))
+
+    def setup_cidr_rules(self, entries):
+        self.host.cidr_rules = set(entries)
+        state, unit = q.blacklist_files()
+        data = q.extend_cidr_state(None, entries)
+        state.write_bytes(data)
+        unit.write_text(q.CIDR_UNIT_TEXT)
+        self.host.enabled_units.add(q.CIDR_UNIT)
+        return data
 
     def test_replace_443_and_matching_port_keep_disjoint_and_remap_tag(self):
         incoming_main = node("main", 443, quota=True)
@@ -248,8 +305,9 @@ class TransactionTests(unittest.TestCase):
         self.assertNotIn(self.old.unit, self.host.enabled_units)
         self.assertFalse(any(self.keep.unit in action[1:] for action in self.host.actions))
         self.assert_clean()
-        origin, _, next_nodes = q.decode_bundle(q.source_bundle(self.host))
+        origin, _, next_nodes, bans = q.decode_bundle(q.source_bundle(self.host))
         self.assertEqual(origin, self.host.identity())
+        self.assertFalse(bans)
         self.assertEqual({value.port for value in next_nodes}, {443, 40000, 40001, 40002})
         self.assertEqual(next(value for value in next_nodes if value.port == 40000).quota["LIMIT_BYTES"], "40")
 
@@ -308,6 +366,93 @@ class TransactionTests(unittest.TestCase):
             q.decode_bundle(packet([node("main", 443), node("vless-temp-new", 443)]))
         with self.assertRaisesRegex(q.MigrationError, "重复"):
             q.decode_bundle(packet([node("main", 443), node("vless-temp-a", 40000), node("vless-temp-b", 40000)]))
+
+    def test_source_exports_cidr_and_legacy_bans_for_migrated_ports(self):
+        wanted = {(40000, "192.0.2.0/24"), (40001, "198.51.100.25/32")}
+        self.setup_cidr_rules({(40000, "192.0.2.0/24"), (40024, "203.0.113.2/32")})
+        self.host.legacy_rules = {(40001, "198.51.100.25/32")}
+        _, _, _, bans = q.decode_bundle(q.source_bundle(self.host))
+        self.assertEqual(bans, wanted)
+        self.assertEqual(self.host.actions, [])
+
+    def test_migration_merges_bans_and_keeps_other_ports(self):
+        old = {(40000, "203.0.113.5/32"), (40001, "192.0.2.0/24")}
+        previous = self.setup_cidr_rules(old)
+        new = {(40000, "198.51.100.2/32")}
+        q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40000)],
+                                         blacklist={(40000, "203.0.113.5/32")} | new))
+        self.assertEqual(self.host.cidr_rules, old | new)
+        saved = Path(q.CIDR_STATE).read_bytes()
+        self.assertEqual(saved, q.extend_cidr_state(previous, new))
+        self.assertTrue(self.host.enabled(q.CIDR_UNIT))
+        self.assert_clean()
+
+    def test_migration_adds_native_service_on_previously_empty_target(self):
+        ban = (40024, "198.51.100.2/32")
+        self.host.legacy_rules = {(40001, "192.0.2.3/32")}
+        q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40024)], blacklist=[ban]))
+        self.assertEqual(self.host.cidr_rules, {ban})
+        self.assertEqual(q.cidr_entries(Path(q.CIDR_STATE).read_text()), {ban})
+        self.assertEqual(self.host.legacy_rules, {(40001, "192.0.2.3/32")})
+        self.assertTrue(self.host.enabled(q.CIDR_UNIT))
+        self.assert_clean()
+
+    def test_rollback_restores_previous_blacklist_and_removes_only_added_entries(self):
+        old = {(40000, "203.0.113.5/32"), (40001, "192.0.2.0/24")}
+        previous = self.setup_cidr_rules(old)
+        new = node("vless-temp-new", 40000)
+        self.host.fail_start = new.unit
+        with self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
+            q.apply_bundle(self.host, packet([node("main", 443), new],
+                                             blacklist=[(40000, "198.51.100.2/32"), (40000, "198.51.100.3/32")]))
+        self.assertEqual(self.host.cidr_rules, old)
+        self.assertEqual(Path(q.CIDR_STATE).read_bytes(), previous)
+        self.assertTrue(self.host.enabled(q.CIDR_UNIT))
+        self.assert_clean()
+
+    def test_rollback_cleans_new_blacklist_service_and_table(self):
+        new = node("vless-temp-new", 40024)
+        self.host.fail_start = new.unit
+        with self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
+            q.apply_bundle(self.host, packet([node("main", 443), new], blacklist=[(40024, "198.51.100.2/32")]))
+        self.assertIsNone(self.host.cidr_rules)
+        self.assertFalse(any(path.exists() for path in q.blacklist_files()))
+        self.assertFalse(self.host.enabled(q.CIDR_UNIT))
+        self.assert_clean()
+
+
+class BlacklistFormatTests(unittest.TestCase):
+    def test_native_listing_supports_numeric_protocols_and_counter_values(self):
+        data = q.extend_cidr_state(None, {(40024, "198.51.100.2/32")}).decode()
+        data = data.replace("priority -150", "priority mangle").replace("{ tcp, udp }", "{ 6, 17 }")
+        data = data.replace("ip saddr 198.51.100.2/32", "ip saddr 198.51.100.2")
+        data = data.replace("counter drop", "counter packets 7 bytes 421 drop")
+        self.assertEqual(q.cidr_entries(data), {(40024, "198.51.100.2/32")})
+        with self.assertRaises(q.MigrationError):
+            q.cidr_entries(data.replace("th dport 40024", "th dport 22"))
+
+    def test_bundle_rejects_bans_outside_migrated_ports(self):
+        with self.assertRaisesRegex(q.MigrationError, "未迁移的端口 22"):
+            q.decode_bundle(packet([node("main", 443)], blacklist=[(22, "198.51.100.2/32")]))
+
+    @unittest.skipUnless(os.environ.get("QIANyi_NFT_NETNS") == "1", "requires an isolated nftables namespace")
+    def test_kernel_blacklist_listing_and_rollback_handles(self):
+        old = (40024, "198.51.100.2/32")
+        added = (40024, "203.0.113.0/24")
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            host = q.Host(work)
+            with patch.multiple(q, BAN_LOCKS=(), CIDR_STATE=str(work / "cidr"),
+                                LEGACY_BAN_STATE=str(work / "legacy")):
+                self.assertFalse(host.tables(), "the test must run in a fresh network namespace")
+                host.nft(q.extend_cidr_state(None, {old, added}).decode())
+                self.assertEqual(host.active_cidrs(), {old, added})
+                host.remove_blacklist_rules({added})
+                self.assertEqual(host.active_cidrs(), {old})
+                host.nft("""create table inet jsh_ipban
+add set inet jsh_ipban banned { type ipv4_addr . inet_service; }
+add element inet jsh_ipban banned { 192.0.2.7 . 40024, 192.0.2.8 . 40025 }""")
+                self.assertEqual(host.source_blacklist({40024}), {old, (40024, "192.0.2.7/32")})
 
 
 class SourceEndpointTests(unittest.TestCase):

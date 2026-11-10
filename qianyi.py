@@ -48,6 +48,28 @@ MAIN_FILES = {
 MAIN_SUB = "/root/v2ray_subscription_base64.txt"
 MAIN_DEFAULTS = "/etc/default/vless-reality"
 JOURNAL = f"{STATE}/.qianyi-recovery.json"
+CIDR_TABLE = "jsh_cidrban"
+CIDR_STATE = "/etc/jsh-cidrban.nft"
+CIDR_UNIT = "jsh-cidrban.service"
+LEGACY_BAN_STATE = "/etc/jsh-ipban.nft"
+BAN_LOCKS = ("/run/jsh-ipban.lock", "/run/jsh-cidrban.lock")
+MAX_BANS = 4096
+CIDR_EMPTY = """table inet jsh_cidrban {
+	chain pre {
+		type filter hook prerouting priority -150; policy accept;
+	}
+}
+"""
+CIDR_UNIT_TEXT = """[Unit]
+Description=Jieshu CIDR port blacklist
+After=nftables.service
+Before=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/jsh-cidrban.nft
+[Install]
+WantedBy=multi-user.target
+"""
 PROFILE = (
     f"{LIB}/common.sh",
     f"{LIB}/quota-lib.sh",
@@ -67,6 +89,10 @@ IFACE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}")
 KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 HEX = re.compile(r"[0-9a-f]{64}")
 FENCE = re.compile(r"qianyi_[0-9a-f]{16}")
+CIDR_RULE = re.compile(
+    r'ip saddr (\S+) meta l4proto \{\s*([^}]+?)\s*\} th dport (\d+) '
+    r'counter(?: packets \d+ bytes \d+)? drop comment "jshcidr:(\d+):([^"]+)"'
+)
 
 
 class MigrationError(Exception):
@@ -361,9 +387,95 @@ def unique_nodes(nodes):
             "发现重复节点端口或标识")
 
 
+def ban_entry(port, network):
+    require(type(port) is int and 1 <= port <= 65535 and isinstance(network, str)
+            and bool(re.fullmatch(r"[0-9.]+(?:/\d{1,2})?", network)), "黑名单条目格式无效")
+    try:
+        return port, str(ipaddress.IPv4Network(network, strict=True))
+    except ValueError:
+        raise MigrationError("黑名单包含无效的 IPv4 地址或网段") from None
+
+
+def ban_entries(rows, ports):
+    require(isinstance(rows, list) and len(rows) <= MAX_BANS, "黑名单清单超过大小限制或格式无效")
+    result = set()
+    for row in rows:
+        require(isinstance(row, list) and len(row) == 2, "黑名单清单格式无效")
+        entry = ban_entry(*row)
+        require(entry[0] in ports, f"黑名单包含本轮未迁移的端口 {entry[0]}")
+        result.add(entry)
+    return result
+
+
+def cidr_entries(text):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    require(len(lines) >= 5 and lines[:2] == ["table inet jsh_cidrban {", "chain pre {"]
+            and lines[-2:] == ["}", "}"]
+            and re.fullmatch(r"type filter hook prerouting priority (?:mangle|-150); policy accept;", lines[2]),
+            "jsh_cidrban 表不是标准 jieshu 格式")
+    result = set()
+    for line in lines[3:-2]:
+        match = CIDR_RULE.fullmatch(line)
+        require(match, "jsh_cidrban 有非标准规则，无法安全迁移")
+        address, protocols, port, label_port, network = match.groups()
+        proto = {value.strip() for value in protocols.split(",")}
+        entry = ban_entry(int(port), address)
+        require(proto in ({"tcp", "udp"}, {"6", "17"})
+                and entry == ban_entry(int(label_port), network) and entry not in result,
+                "jsh_cidrban 的规则与标签不一致")
+        result.add(entry)
+    return result
+
+
+def legacy_ban_entries(text):
+    require(re.search(r"\bset\s+banned\s*\{", text)
+            and re.search(r"\btype\s+ipv4_addr\s*\.\s*inet_service\b", text),
+            "jsh_ipban 集合不是标准 jieshu 格式")
+    elements = re.search(r"\belements\s*=\s*\{([^}]*)\}", text, re.S)
+    if elements is None:
+        require(not re.search(r"\belements\s*=", text), "jsh_ipban 元素格式无效")
+        return set()
+    result = set()
+    for value in elements[1].split(","):
+        if value.strip():
+            match = re.fullmatch(r"\s*([0-9.]+)\s*\.\s*(\d+)\s*", value)
+            require(match, "jsh_ipban 有非标准元素，无法安全迁移")
+            result.add(ban_entry(int(match[2]), match[1]))
+    return result
+
+
+def cidr_rule(port, network):
+    return (f'ip saddr {network} meta l4proto {{ tcp, udp }} th dport {port} counter drop '
+            f'comment "jshcidr:{port}:{network}"')
+
+
+def extend_cidr_state(previous, additions):
+    text = CIDR_EMPTY if previous is None else previous.decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    closing = [index for index, line in enumerate(lines) if line.strip() == "}"][-2]
+    rules = [f"\t\t{cidr_rule(port, network)}\n" for port, network in sorted(additions)]
+    lines[closing:closing] = rules
+    result = "".join(lines).encode()
+    require(len(result) <= MAX_STATE_FILE, "目标黑名单配置超过大小限制")
+    return result
+
+
+def ban_plan_state(plan, ports):
+    require(isinstance(plan, dict) and set(plan) == {"previous", "entries"}, "黑名单恢复记录格式无效")
+    original = plan["previous"]
+    require(original is None or isinstance(original, str) and len(original) <= 2 * MAX_STATE_FILE,
+            "黑名单恢复文件超过大小限制或格式无效")
+    previous = None if original is None else base64.b64decode(original, validate=True)
+    before = set() if previous is None else cidr_entries(previous.decode("utf-8"))
+    additions = ban_entries(plan["entries"], ports)
+    require(additions and not before & additions, "黑名单恢复记录与旧配置冲突")
+    return previous, before, additions
+
+
 def decode_bundle(packet):
     bundle = decode_json(packet)
-    require(isinstance(bundle, dict) and set(bundle) == {"format", "profile", "nodes", "origin"}
+    fields = {"format", "profile", "nodes", "origin"}
+    require(isinstance(bundle, dict) and set(bundle) - {"blacklist"} == fields
             and bundle["format"] == FORMAT and isinstance(bundle["origin"], str) and HEX.fullmatch(bundle["origin"]),
             "迁移包版本不支持")
     require(isinstance(bundle["nodes"], list) and 1 <= len(bundle["nodes"]) <= 512
@@ -371,7 +483,8 @@ def decode_bundle(packet):
     nodes = [parse_node(item) for item in bundle["nodes"]]
     unique_nodes(nodes)
     require(any(n.main for n in nodes), "迁移包缺少 443 主节点")
-    return bundle["origin"], bundle["profile"], nodes
+    bans = ban_entries(bundle.get("blacklist", []), {node.port for node in nodes})
+    return bundle["origin"], bundle["profile"], nodes, bans
 
 
 def plan_nodes(incoming, current):
@@ -450,6 +563,10 @@ def guard_file(unit):
     return Path(SYSTEMD) / f"{unit}.d" / "80-qianyi-transaction.conf"
 
 
+def blacklist_files():
+    return Path(CIDR_STATE), Path(SYSTEMD) / CIDR_UNIT
+
+
 def permit_file(table):
     return Path(f"/run/{table}.permit")
 
@@ -504,6 +621,9 @@ class Host:
 
     def policy_lock(self):
         return self.lock("portquota.lock", "iplimit.lock")
+
+    def blacklist_lock(self):
+        return self.lock(*BAN_LOCKS)
 
     def native(self, script, *args):
         preamble = f"""set -Eeuo pipefail
@@ -680,17 +800,127 @@ source {LIB}/iplimit-lib.sh
         if "pbw_policy" in tables:
             raw = self.run("nft", "-n", "list", "table", "inet", "pbw_policy").stdout
             bandwidth |= ports & {int(port) for port in re.findall(r'comment "pbw-(\d+)-', raw)}
-        blocked = set()
-        for table, file, pattern in (
-            ("jsh_cidrban", "/etc/jsh-cidrban.nft", r'comment "jshcidr:(\d+):'),
-            ("jsh_ipban", "/etc/jsh-ipban.nft", r"\.\s+(\d+)\b"),
-        ):
-            text = self.run("nft", "-n", "list", "table", "inet", table).stdout if table in tables else ""
-            if exists(file):
-                text += "\n" + secure_read(file).decode()
-            blocked |= ports & {int(port) for port in re.findall(pattern, text)}
-        require(not (paused or bandwidth or blocked),
-                f"待迁端口有独立策略，须先单独处理。暂停 {sorted(paused)}，portbw {sorted(bandwidth)}，黑名单 {sorted(blocked)}")
+        require(not (paused or bandwidth),
+                f"待迁端口有独立策略，须先单独处理。暂停 {sorted(paused)}，portbw {sorted(bandwidth)}")
+
+    def active_cidrs(self):
+        if CIDR_TABLE not in self.tables():
+            return None
+        raw = self.run("nft", "-n", "list", "table", "inet", CIDR_TABLE).stdout
+        return cidr_entries(raw)
+
+    def source_blacklist(self, ports):
+        # A read-only snapshot can reuse existing locks without creating files.
+        with self.lock(*(path for path in BAN_LOCKS if exists(path))):
+            entries = self.active_cidrs() or set()
+            if exists(CIDR_STATE):
+                entries |= cidr_entries(secure_read(CIDR_STATE).decode("utf-8"))
+            if "jsh_ipban" in self.tables():
+                raw = self.run("nft", "-n", "list", "set", "inet", "jsh_ipban", "banned").stdout
+                entries |= legacy_ban_entries(raw)
+            if exists(LEGACY_BAN_STATE):
+                entries |= legacy_ban_entries(secure_read(LEGACY_BAN_STATE).decode("utf-8"))
+        return {entry for entry in entries if entry[0] in ports}
+
+    def prepare_blacklist(self, requested):
+        state_path, unit_path = blacklist_files()
+        active = self.active_cidrs()
+        previous = secure_read(state_path) if exists(state_path) else None
+        if active is None:
+            require(previous is None and not exists(unit_path)
+                    and self.property(CIDR_UNIT, "LoadState") == "not-found",
+                    "目标黑名单有持久配置但未加载，请先检查 jsh-cidrban.service")
+        else:
+            require(previous is not None and cidr_entries(previous.decode("utf-8")) == active
+                    and exists(unit_path), "目标黑名单运行规则与持久配置不一致")
+            require(normalized_unit(secure_read(unit_path).decode()) == normalized_unit(CIDR_UNIT_TEXT)
+                    and self.property(CIDR_UNIT, "FragmentPath") == str(unit_path)
+                    and not self.property(CIDR_UNIT, "DropInPaths") and self.enabled(CIDR_UNIT),
+                    "目标黑名单恢复服务不是标准且已启用的 jieshu 服务")
+        additions = requested - (active or set())
+        if not additions:
+            return None
+        for path in (state_path, unit_path):
+            require(path.resolve() == path and not exists(pending_file(path)),
+                    f"目标黑名单路径异常 {path}")
+        udp_ports = set()
+        for line in self.run("ss", "-H", "-aun").stdout.splitlines():
+            columns = line.split()
+            port = columns[3].rpartition(":")[2] if len(columns) >= 4 else ""
+            if port.isdecimal():
+                udp_ports.add(int(port))
+        conflicts = udp_ports & {port for port, _ in additions}
+        require(not conflicts, f"目标机有 UDP 服务占用黑名单端口 {sorted(conflicts)}")
+        extend_cidr_state(previous, additions)
+        return {"previous": None if previous is None else base64.b64encode(previous).decode(),
+                "entries": [list(entry) for entry in sorted(additions)]}
+
+    def apply_blacklist(self, plan, ports):
+        previous, _, additions = ban_plan_state(plan, ports)
+        state_path, unit_path = blacklist_files()
+        commands = []
+        if previous is None:
+            commands += [f"create table inet {CIDR_TABLE}",
+                         f"add chain inet {CIDR_TABLE} pre {{ type filter hook prerouting priority -150; policy accept; }}"]
+        commands += [f"add rule inet {CIDR_TABLE} pre {cidr_rule(*entry)}" for entry in sorted(additions)]
+        self.nft("\n".join(commands))
+        write_file(state_path, extend_cidr_state(previous, additions))
+        if previous is None:
+            write_file(unit_path, CIDR_UNIT_TEXT.encode(), 0o644)
+            self.sys("daemon-reload")
+            self.sys("enable", CIDR_UNIT)
+
+    def verify_blacklist(self, plan, ports):
+        _, before, additions = ban_plan_state(plan, ports)
+        expected = before | additions
+        active = self.active_cidrs()
+        require(active is not None and expected <= active
+                and expected <= cidr_entries(secure_read(CIDR_STATE).decode("utf-8"))
+                and self.enabled(CIDR_UNIT), "目标机黑名单未生效或无法在重启后恢复")
+
+    def restore_blacklist(self, plan, ports):
+        previous, before, additions = ban_plan_state(plan, ports)
+        state_path, unit_path = blacklist_files()
+        current = secure_read(state_path) if exists(state_path) else None
+        require(current in (previous, extend_cidr_state(previous, additions)),
+                "黑名单持久配置在迁移期间被改动，保留原文件")
+        active = self.active_cidrs()
+        if previous is None:
+            if active is not None:
+                require(active <= additions, "黑名单表出现外部改动，保留现有规则")
+                self.nft(f"delete table inet {CIDR_TABLE}")
+            if exists(unit_path):
+                require(secure_read(unit_path) == CIDR_UNIT_TEXT.encode(), "黑名单服务归属异常")
+                self.sys("disable", CIDR_UNIT)
+                remove_file(unit_path)
+                self.sys("daemon-reload")
+            remove_file(state_path)
+        else:
+            if active is None:
+                self.nft(previous.decode("utf-8"))
+            else:
+                require(before <= active <= before | additions, "黑名单表出现外部改动，保留现有规则")
+                self.remove_blacklist_rules(active & additions)
+            if current != previous:
+                write_file(state_path, previous)
+        require(self.active_cidrs() == (before if previous is not None else None), "目标原黑名单恢复失败")
+
+    def remove_blacklist_rules(self, entries):
+        if not entries:
+            return
+        comments = {f"jshcidr:{port}:{network}" for port, network in entries}
+        result = decode_json(self.run("nft", "-j", "-a", "list", "chain", "inet", CIDR_TABLE, "pre").stdout)
+        handles = {}
+        for item in result["nftables"]:
+            rule = item.get("rule", {})
+            comment = rule.get("comment")
+            if comment in comments:
+                handle = rule.get("handle")
+                require(type(handle) is int and handle > 0 and comment not in handles,
+                        "黑名单规则句柄异常")
+                handles[comment] = handle
+        require(set(handles) == comments, "无法确认本轮新增黑名单规则")
+        self.nft("\n".join(f"delete rule inet {CIDR_TABLE} pre handle {handle}" for handle in handles.values()))
 
     def adapt_nat(self, node):
         if not node.nat:
@@ -852,8 +1082,10 @@ def source_bundle(host):
             host.policy_state(node)
             host.capture_quota(node)
         profile = host.profile(any(node.nat for node in nodes))
+        blacklist = host.source_blacklist(set(by_port))
+        require(len(blacklist) <= MAX_BANS, "待迁黑名单条目超过大小限制")
         packet = encode_json({"format": FORMAT, "origin": host.identity(), "profile": profile,
-                              "nodes": [asdict(node) for node in nodes]})
+                              "nodes": [asdict(node) for node in nodes], "blacklist": sorted(blacklist)})
         require(len(packet) <= MAX_PACKET and len(nodes) <= 512, "节点数量或迁移包超过限制")
         return packet
 
@@ -870,8 +1102,8 @@ def journal_write(tx):
 
 def journal_read():
     data = decode_json(secure_read(JOURNAL, MAX_PACKET * 2))
-    require(isinstance(data, dict)
-            and set(data) == {"format", "fence", "phase", "new", "old", "defaults", "main_subscription"}
+    fields = {"format", "fence", "phase", "new", "old", "defaults", "main_subscription"}
+    require(isinstance(data, dict) and set(data) - {"blacklist"} == fields
             and data["format"] == FORMAT and isinstance(data["fence"], str) and FENCE.fullmatch(data["fence"])
             and data["phase"] in {"prepare", "restore", "rollback_done", "publish"}
             and isinstance(data["old"], list) and isinstance(data["new"], list), "恢复文件格式不支持")
@@ -887,6 +1119,8 @@ def journal_read():
         require(isinstance(data[key], str) and len(data[key]) <= MAX_STATE_FILE * 2,
                 "主节点恢复材料异常")
         base64.b64decode(data[key], validate=True)
+    if "blacklist" in data:
+        ban_plan_state(data["blacklist"], {node.port for node in new})
     return data
 
 
@@ -903,8 +1137,11 @@ def transaction_files(nodes):
     return paths
 
 
-def clean_pending(nodes, table):
-    for path in transaction_files(nodes) | {permit_file(table)}:
+def clean_pending(nodes, table, *, blacklist=False):
+    paths = transaction_files(nodes) | {permit_file(table)}
+    if blacklist:
+        paths.update(blacklist_files())
+    for path in paths:
         temporary = pending_file(path)
         if exists(temporary):
             secure_read(temporary, MAX_PACKET * 2)
@@ -936,7 +1173,8 @@ def restore_target(host, tx, *, recovering=False):
     old = [node for _, node in backup]
     ports = {node.port for node in new}
     units = {node.unit for node in new + old}
-    clean_pending(new + old, tx["fence"])
+    blacklist = tx.get("blacklist")
+    clean_pending(new + old, tx["fence"], blacklist=blacklist is not None)
     if tx["phase"] == "restore":
         if tx["fence"] not in host.tables():
             host.fence(tx["fence"], ports)
@@ -946,6 +1184,8 @@ def restore_target(host, tx, *, recovering=False):
         for node in new:
             if not node.main and host.property(node.unit, "LoadState") != "not-found":
                 host.sys("disable", node.unit)
+        if blacklist is not None:
+            host.restore_blacklist(blacklist, ports)
         with host.policy_lock():
             host.clear_policies(ports)
             host.remove_temp_nodes(new + old)
@@ -980,7 +1220,10 @@ def restore_target(host, tx, *, recovering=False):
 def publish_target(host, tx, *, recovering=False):
     nodes, old = transaction_nodes(tx)
     if recovering:
-        clean_pending(nodes + [node for _, node in old], tx["fence"])
+        blacklist = tx.get("blacklist")
+        clean_pending(nodes + [node for _, node in old], tx["fence"], blacklist=blacklist is not None)
+        if blacklist is not None:
+            host.verify_blacklist(blacklist, {node.port for node in nodes})
         live = [node for node in nodes if not expired(node)]
         host.permit_units(tx["fence"])
         host.sys("start", *(node.unit for node in live), timeout=150)
@@ -996,8 +1239,8 @@ def publish_target(host, tx, *, recovering=False):
 
 
 def apply_bundle(host, packet):
-    origin, profile, all_incoming = decode_bundle(packet)
-    with host.temp_lock():
+    origin, profile, all_incoming, all_bans = decode_bundle(packet)
+    with host.temp_lock(), (host.blacklist_lock() if all_bans else contextlib.nullcontext()):
         require(not exists(JOURNAL) and not exists(pending_file(Path(JOURNAL))),
                 "目标机还有未完成的接管，请先运行 recover")
         require(origin != host.identity(), "源机和目标机 machine-id 相同，请核对两台机器")
@@ -1011,6 +1254,7 @@ def apply_bundle(host, packet):
         current = host.inventory()
         nodes, conflicts = plan_nodes(incoming, current)
         ports = {node.port for node in nodes}
+        requested_bans = {entry for entry in all_bans if entry[0] in ports}
         for node in nodes:
             if node.main:
                 version = current[443].meta.get("XRAY_VERSION")
@@ -1028,6 +1272,7 @@ def apply_bundle(host, packet):
             old_by_port = {node.port: node for node in old}
             old_by_unit = {node.unit: node for node in old}
             host.inspect_owners(ports, old_by_port)
+            blacklist = host.prepare_blacklist(requested_bans) if requested_bans else None
             paths = {path for node in old for path in node.paths().values()}
             for node in old:
                 host.check_unit(node)
@@ -1055,6 +1300,8 @@ def apply_bundle(host, packet):
                   new=[asdict(node) for node in nodes], old=backup,
                   defaults=base64.b64encode(old_defaults).decode(),
                   main_subscription=base64.b64encode(old_subscription).decode())
+        if blacklist is not None:
+            tx["blacklist"] = blacklist
         journal_write(tx)
         try:
             host.fence(tx["fence"], ports)
@@ -1081,6 +1328,9 @@ def apply_bundle(host, packet):
                 host.remove_temp_nodes(old)
                 write_file(MAIN_DEFAULTS, new_defaults)
                 host.install(nodes)
+            if blacklist is not None:
+                host.apply_blacklist(blacklist, ports)
+                host.verify_blacklist(blacklist, ports)
             host.sys("daemon-reload")
             host.sys("enable", *(node.unit for node in nodes), timeout=100)
             host.permit_units(tx["fence"])
@@ -1109,6 +1359,8 @@ def apply_bundle(host, packet):
                     raise MigrationError(f"目标未完成收尾，保留恢复文件 {JOURNAL}。{recovery}") from None
             raise
         print(f"目标已接管 443，替换 {len(old) - 1} 个临时节点，新增 {len(nodes) - len(old)} 个临时节点。", flush=True)
+        if requested_bans:
+            print(f"已接续 {len(requested_bans)} 条源机黑名单。", flush=True)
 
 
 def recover_target(host):
@@ -1121,11 +1373,12 @@ def recover_target(host):
             host.legacy(remove=True)
             return
         tx = journal_read()
-        if tx["phase"] == "publish":
-            publish_target(host, tx, recovering=True)
-        else:
-            restore_target(host, tx, recovering=True)
-            host.legacy(remove=True)
+        with host.blacklist_lock() if "blacklist" in tx else contextlib.nullcontext():
+            if tx["phase"] == "publish":
+                publish_target(host, tx, recovering=True)
+            else:
+                restore_target(host, tx, recovering=True)
+                host.legacy(remove=True)
 
 
 class Workspace:

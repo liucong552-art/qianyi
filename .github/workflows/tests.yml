@@ -13,3 +13,10 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -B -m unittest discover -s tests -v
+      - name: Verify the blacklist against Linux nftables
+        run: |
+          if ! command -v nft >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y nftables
+          fi
+          sudo unshare --net -- env QIANyi_NFT_NETNS=1 python3 -B -m unittest discover -s tests -v -k kernel_blacklist
