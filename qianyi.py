@@ -32,6 +32,8 @@ from uuid import UUID
 FORMAT = 1
 MAX_PACKET = 32 * 1024 * 1024
 MAX_STATE_FILE = 1024 * 1024
+SSH_FRAME = re.compile(rb"QYSSH1 ([1-9][0-9]{0,8}) ([0-9a-f]{64})\n")
+MAX_SSH_PREAMBLE = 8192
 SOURCE_URL = "https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py"
 STATE = "/var/lib/vless-reality"
 LOCK_DIR = "/run/vless-reality"
@@ -1603,6 +1605,46 @@ def receive(args, host):
     apply_bundle(host, packet)
 
 
+def write_ssh_frame(stream, packet):
+    require(0 < len(packet) <= MAX_PACKET, "迁移快照大小无效")
+    stream.write(f"QYSSH1 {len(packet)} {sha(packet)}\n".encode("ascii"))
+    stream.write(packet)
+    stream.flush()
+
+
+def read_ssh_frame(stream):
+    remaining = MAX_SSH_PREAMBLE
+    while remaining:
+        # Some login shells print a banner before executing the SSH command.
+        line = stream.readline(remaining)
+        if not line:
+            break
+        header = SSH_FRAME.fullmatch(line.removeprefix(b"\xef\xbb\xbf"))
+        if header is not None:
+            size = number(header[1].decode("ascii"), "迁移快照长度", 1, MAX_PACKET)
+            packet = stream.read(size)
+            require(len(packet) == size and secrets.compare_digest(sha(packet).encode("ascii"), header[2]),
+                    "SSH 迁移快照不完整或 SHA-256 不符")
+            require(not stream.read(1), "SSH 迁移快照之后有额外数据")
+            return packet
+        remaining -= len(line)
+    raise MigrationError("SSH 未收到有效的迁移快照")
+
+
+def export_ssh(host, workspace):
+    require(not sys.stdout.isatty(), "请从 Windows PowerShell 启动自动迁移")
+    host.legacy()
+    packet = source_bundle(host)
+    host.legacy(remove=True)
+    workspace.cleanup()
+    write_ssh_frame(sys.stdout.buffer, packet)
+
+
+def import_ssh(host):
+    require(not sys.stdin.isatty(), "请从 Windows PowerShell 启动自动迁移")
+    apply_bundle(host, read_ssh_frame(sys.stdin.buffer))
+
+
 def port_arg(value):
     port = int(value)
     if not 1 <= port <= 65535:
@@ -1679,6 +1721,8 @@ def parse_args(argv):
     target.add_argument("--sha256", required=True)
     target.add_argument("--ssh-key")
     target.add_argument("--ssh-port", type=port_arg, default=22)
+    sub.add_parser("export-ssh", help="由 Windows 工具通过 SSH 读取快照")
+    sub.add_parser("import-ssh", help="由 Windows 工具通过 SSH 提交快照")
     sub.add_parser("recover", help="恢复或完成上次被中断的目标机事务")
     return parser.parse_args(argv)
 
@@ -1701,6 +1745,10 @@ def main(argv=None):
             send(args, host, workspace)
         elif args.action == "receive":
             receive(args, host)
+        elif args.action == "export-ssh":
+            export_ssh(host, workspace)
+        elif args.action == "import-ssh":
+            import_ssh(host)
         else:
             recover_target(host)
         workspace.cleanup()
@@ -1719,7 +1767,7 @@ def main(argv=None):
             message = f"配置、迁移包或系统命令输出格式异常（{type(exc).__name__}）"
         print(f"迁移未完成。{message}", file=sys.stderr)
         return 1
-    if args.action == "receive":
+    if args.action in ("receive", "import-ssh"):
         print("迁移完成。两端的本轮临时文件和工具已清理，请验证原链接、切 DNS，再自行重装旧机。", flush=True)
     elif args.action == "recover":
         print("恢复与清理完成，请检查目标节点状态。", flush=True)

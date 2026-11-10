@@ -4,33 +4,44 @@
 
 ## 开始前
 
-- 两台 VPS 均须已有标准的 `jieshu` 443 主节点、相同版本的 `jieshu` 管理库、Python 3.10+、systemd、nftables、`ss` 和 `curl`。源机需要 OpenSSL。
-- 默认使用目标机到源机的 root SSH 和 TCP 本地转发。源机需启用默认的 Ed25519 主机密钥，目标端需能以正常 SSH 认证连接源机。新工具不修改防火墙、安全组或 SSH 配置。
+- 两台 VPS 均须已有标准的 `jieshu` 443 主节点、相同版本的 `jieshu` 管理库、Python 3.10+、systemd、nftables、`ss` 和 `curl`。两台 VPS 直接传输时，源机还需要 OpenSSL。
+- Windows 一键方式需要能用同一个私钥从 Windows 登录两台 VPS，并已核对两台的 SSH 主机指纹。两台 VPS 直接传输方式则使用目标机到源机的 root SSH 和 TCP 本地转发。
 - WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，迁入节点改用目标机的 mark、路由表和优先级。
 - 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
 - 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
 
-### Windows 私钥登录
+## Windows 一键迁移
 
-如果你从 Windows 用 `ssh -i` 登录两台 VPS，而目标端报 `Permission denied (publickey)`，目标机可以通过当前 SSH 会话向 Windows 的代理请求认证。
+**如果你平时在 Windows 用私钥登录两台 VPS，直接把下面整段粘贴到 Windows PowerShell。** 按提示填写源机和目标机的公网 IPv4。默认 SSH 端口为 22，其他端口可在对应提示里填写 `IPv4:端口`。脚本优先使用 `.ssh\vps_root_ed25519`，也识别常用的 SSH 私钥文件名。
 
-1. 在 Windows 以管理员身份打开 PowerShell，启动 OpenSSH 代理。
+```powershell
+& {
+    $ErrorActionPreference = 'Stop'
+    $client = [Net.WebClient]::new()
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $previousTls = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
+        $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
+        if ($hash -ne '50797f2ecd48af968f063e8ed7302a1b535b236959df59b3ec8933b41fd186fc') {
+            throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
+        }
+    }
+    finally {
+        [Net.ServicePointManager]::SecurityProtocol = $previousTls
+        $client.Dispose()
+        $sha256.Dispose()
+    }
+    & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($body)))
+}
+```
 
-   ```powershell
-   if ((Get-Service ssh-agent).StartType -eq 'Disabled') {
-       Set-Service ssh-agent -StartupType Manual
-   }
-   Start-Service ssh-agent
-   ```
+Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机传给目标机。快照只经过 Windows 内存，私钥文件留在电脑上。先用你平时的 SSH 登录方式验证两台 VPS 的主机指纹，尤其是重装后。看到「迁移完成」后，用原链接验收节点，再切 DNS 和重装旧机。
 
-2. 回到你平时登录 VPS 的 PowerShell，把你原来的私钥加入代理，并用 `-A` 登录**目标机**。示例里的私钥路径、端口和目标 IP 按你的登录命令填写。
+## 两台 VPS 直接传输
 
-   ```powershell
-   ssh-add "$env:USERPROFILE\.ssh\vps_root_ed25519"
-   ssh -A -i "$env:USERPROFILE\.ssh\vps_root_ed25519" -p 22 root@203.0.113.20
-   ```
-
-3. 在目标机运行 `ssh-add -l`。看到密钥指纹后，从源机生成新的迁移命令和令牌，再在这个目标机窗口运行。转发只用于你信任的目标机。迁移完成后退出目标机，并在 Windows PowerShell 运行 `ssh-add -d "$env:USERPROFILE\.ssh\vps_root_ed25519"`，移除这次载入代理的密钥。
+适合目标机已有凭据登录源机的场景。Windows 一键方式使用上面的独立入口。
 
 ## 第一步，在源机运行
 
@@ -47,7 +58,7 @@
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' '4e4c7aaf4cb26e3fbced7a2caea3fe979f0bc6119e3d95add2b013866b41cf46' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' 'ceed30ced2f92da48976cd6ec461a6c29fb16c80de652bb552cf6dd641be025e' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```
@@ -76,4 +87,4 @@
 python3 -B -m unittest discover -s tests -v
 ```
 
-测试包含真实回环 TLS 传输及本地事务模拟。真机验收仍需在两台 VPS 上检查 Xray/Reality、WireGuard、配额规则、重启恢复和双向轮换。
+测试包含真实回环 TLS 传输、本地事务模拟，以及 Windows PowerShell 的二进制转发测试。真机验收仍需在两台 VPS 上检查 Xray/Reality、WireGuard、配额规则、重启恢复和双向轮换。

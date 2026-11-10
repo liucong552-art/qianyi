@@ -2,6 +2,7 @@ import base64
 import contextlib
 import copy
 from dataclasses import asdict
+from io import BytesIO
 import os
 from pathlib import Path
 import queue
@@ -492,6 +493,44 @@ class SourceEndpointTests(unittest.TestCase):
         direct, prompts = self.settings(login, ["--direct"], replies=[""])
         self.assertEqual(direct, ("8.8.8.8", 22022, 48999))
         self.assertEqual(len(prompts), 1)
+
+
+class SshFrameTests(unittest.TestCase):
+    def test_binary_snapshot_round_trips_after_a_bounded_banner(self):
+        snapshot = bytes(range(256)) * 1024
+        output = BytesIO(b"ssh banner\n")
+        output.seek(0, os.SEEK_END)
+        q.write_ssh_frame(output, snapshot)
+        self.assertEqual(q.read_ssh_frame(BytesIO(output.getvalue())), snapshot)
+
+    def test_truncated_modified_or_extended_frames_are_rejected(self):
+        output = BytesIO()
+        q.write_ssh_frame(output, b"secret snapshot")
+        frame = output.getvalue()
+        for invalid in (frame[:-1], frame[:-1] + b"z", frame + b"unexpected",
+                        b"x" * q.MAX_SSH_PREAMBLE + b"\n" + frame):
+            with self.subTest(frame=invalid[:12]), self.assertRaises(q.MigrationError):
+                q.read_ssh_frame(BytesIO(invalid))
+
+    def test_source_workspace_is_cleaned_before_emitting_a_frame(self):
+        events = []
+        class Output(BytesIO):
+            def write(self, data):
+                self_test.assertEqual(events, ["legacy checked", "legacy cleaned", "workspace removed"])
+                return super().write(data)
+
+        self_test = self
+        stream = Output()
+        output = SimpleNamespace(isatty=lambda: False, buffer=stream)
+        host = SimpleNamespace(legacy=lambda remove=False: events.append("legacy cleaned" if remove else "legacy checked"))
+        workspace = SimpleNamespace(cleanup=lambda: events.append("workspace removed"))
+        with patch.object(q.sys, "stdout", output), patch.object(q, "source_bundle", return_value=b"snapshot"):
+            q.export_ssh(host, workspace)
+        self.assertEqual(q.read_ssh_frame(BytesIO(stream.getvalue())), b"snapshot")
+
+    def test_interactive_export_does_not_print_a_snapshot(self):
+        with patch.object(q.sys.stdout, "isatty", return_value=True), self.assertRaises(q.MigrationError):
+            q.export_ssh(None, None)
 
 
 class TransportTests(unittest.TestCase):
