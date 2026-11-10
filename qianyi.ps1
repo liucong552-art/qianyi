@@ -15,7 +15,23 @@ printf '%s  %s\n' "$1" "$d/qianyi.py" | sha256sum -c - >/dev/null
 python3 -I -B "$d/qianyi.py" "$2"
 '@
 
-function Read-QianyiEndpoint([string] $Prompt) {
+function Read-QianyiPort([string] $Role, [int] $DefaultPort) {
+    while ($true) {
+        $inputValue = (Read-Host "$Role SSH 端口（回车使用 $DefaultPort）").Trim()
+        if (-not $inputValue) {
+            return $DefaultPort
+        }
+        if ($inputValue -match '^[0-9]{1,5}$') {
+            $port = [int] $inputValue
+            if ($port -ge 1 -and $port -le 65535) {
+                return $port
+            }
+        }
+        Write-Host 'SSH 端口请输入 1 到 65535 之间的数字。'
+    }
+}
+
+function Read-QianyiEndpoint([string] $Role, [string] $Prompt) {
     while ($true) {
         $inputValue = (Read-Host $Prompt).Trim()
         if ($inputValue -match '^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$') {
@@ -24,10 +40,10 @@ function Read-QianyiEndpoint([string] $Prompt) {
             $parsed = $null
             if ([Net.IPAddress]::TryParse($address, [ref] $parsed) -and
                 $parsed.ToString() -eq $address -and $port -ge 1 -and $port -le 65535) {
-                return [pscustomobject] @{ Address = $address; Port = $port }
+                return [pscustomobject] @{ Address = $address; Port = (Read-QianyiPort $Role $port) }
             }
         }
-        Write-Host '请输入 IPv4 地址。如果 SSH 不是 22 端口，可以填 IPv4:端口。'
+        Write-Host '请输入正确的 IPv4 地址。'
     }
 }
 
@@ -148,13 +164,14 @@ function Invoke-QianyiTransfer($Source, $Target, [string] $Key) {
 }
 
 function Invoke-Qianyi {
-    $source = Read-QianyiEndpoint '源机公网 IPv4（现在正在用的 VPS）'
-    $target = Read-QianyiEndpoint '目标机公网 IPv4（准备接班的 VPS）'
+    $source = Read-QianyiEndpoint '源机' '源机公网 IPv4（现在正在用的 VPS）'
+    $target = Read-QianyiEndpoint '目标机' '目标机公网 IPv4（准备接班的 VPS）'
     if ($source.Address -eq $target.Address -and $source.Port -eq $target.Port) {
         throw '源机和目标机填成了同一个 SSH 地址。'
     }
     $key = Find-QianyiKey
-    Write-Host "迁移方向 $($source.Address) → $($target.Address)。目标机的 443 和同端口节点会被接管。"
+    Write-Host "迁移方向 $($source.Address):$($source.Port) → $($target.Address):$($target.Port)。目标机的 443 和同端口节点会被接管。"
+    Write-Host '如果出现 Enter passphrase，请输入这把 SSH 私钥的口令。输入时不会显示字符。'
     Invoke-QianyiTransfer $source $target $key
 }
 

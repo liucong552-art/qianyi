@@ -12,7 +12,7 @@
 
 ## Windows 一键迁移
 
-**如果你平时在 Windows 用私钥登录两台 VPS，直接把下面整段粘贴到 Windows PowerShell。** 按提示填写源机和目标机的公网 IPv4。默认 SSH 端口为 22，其他端口可在对应提示里填写 `IPv4:端口`。脚本优先使用 `.ssh\vps_root_ed25519`，也识别常用的 SSH 私钥文件名。
+**如果你平时在 Windows 用私钥登录两台 VPS，直接把下面整段粘贴到 Windows PowerShell。** 程序会分别询问两台 VPS 的公网 IPv4 和 SSH 端口。端口是 22 时按回车，其他端口直接输入数字。脚本优先使用 `.ssh\vps_root_ed25519`，也识别常用的 SSH 私钥文件名。
 
 ```powershell
 & {
@@ -24,7 +24,7 @@
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
         $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
-        if ($hash -ne '50797f2ecd48af968f063e8ed7302a1b535b236959df59b3ec8933b41fd186fc') {
+        if ($hash -ne '35c6dab577a5ae5b7834fb6a41e6abaf4accfce234a9293117353c6882875594') {
             throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
         }
     }
@@ -37,7 +37,7 @@
 }
 ```
 
-Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机传给目标机。快照只经过 Windows 内存，私钥文件留在电脑上。先用你平时的 SSH 登录方式验证两台 VPS 的主机指纹，尤其是重装后。看到「迁移完成」后，用原链接验收节点，再切 DNS 和重装旧机。
+Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机传给目标机。快照只经过 Windows 内存，私钥文件留在电脑上。如果 SSH 提示 `Enter passphrase`，输入创建私钥时设置的口令。换电脑后，在新电脑上准备能登录两台 VPS 的私钥，并用平时的 SSH 登录方式核对两台机器的主机指纹。看到「迁移完成」后，用原链接验收节点，再切 DNS 和重装旧机。
 
 ## 两台 VPS 直接传输
 

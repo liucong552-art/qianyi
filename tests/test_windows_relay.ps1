@@ -12,6 +12,25 @@ if ($pythonHash -ne $QianyiPythonHash -or -not (Get-Content README.md -Raw).Cont
     throw 'Published bootstrap checksums do not match.'
 }
 
+$script:PortPrompts = [Collections.Generic.List[string]]::new()
+$script:EndpointAnswers = [Collections.Generic.Queue[string]]::new()
+foreach ($answer in @('192.0.2.10', '65536', '22022', '192.0.2.11', '', '192.0.2.12:22023', '')) {
+    $script:EndpointAnswers.Enqueue($answer)
+}
+function Read-Host([string] $Prompt) {
+    $script:PortPrompts.Add($Prompt)
+    return $script:EndpointAnswers.Dequeue()
+}
+$sourceChoice = Read-QianyiEndpoint 'Source' 'Source IPv4'
+$targetChoice = Read-QianyiEndpoint 'Target' 'Target IPv4'
+$prefilledChoice = Read-QianyiEndpoint 'Other' 'Other IPv4'
+if ($sourceChoice.Port -ne 22022 -or $targetChoice.Port -ne 22 -or $prefilledChoice.Port -ne 22023 -or
+    $script:PortPrompts[1] -notmatch '^Source SSH .*22' -or
+    $script:PortPrompts[4] -notmatch '^Target SSH .*22' -or $script:EndpointAnswers.Count -ne 0) {
+    throw 'The Windows launcher did not prompt for each SSH port.'
+}
+Write-Host 'Windows launcher handles per-host SSH ports and the default port.'
+
 $script:Python = (Get-Command python.exe -CommandType Application | Select-Object -First 1).Source
 $remote = Get-QianyiRemoteCommand 'import-ssh'
 $expectedArgs = @('with spaces', 'with "quotes"', 'path\', '', $remote)
