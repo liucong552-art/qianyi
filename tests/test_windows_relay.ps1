@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..')).ProviderPath
 Set-Location -LiteralPath $repository
+[Environment]::CurrentDirectory = $repository
 $launcherPath = Join-Path $repository 'qianyi.ps1'
 $launcher = [ScriptBlock]::Create([IO.File]::ReadAllText($launcherPath, [Text.Encoding]::UTF8))
 . $launcher
@@ -34,12 +35,15 @@ $script:SourceFails = $false
 
 function Start-QianyiSsh($Endpoint, [string] $Key, [string] $Action) {
     $script:Actions.Add($Action)
+    # The frame codec is portable. Stub the Linux-only lock module when
+    # importing the VPS implementation into the Windows test process.
+    $fixture = "import sys, types; sys.modules['fcntl'] = types.ModuleType('fcntl'); import qianyi; "
     if ($Action -eq 'export-ssh') {
-        $program = 'import sys, qianyi; qianyi.write_ssh_frame(sys.stdout.buffer, bytes(range(256)) * 1024)'
+        $program = $fixture + 'qianyi.write_ssh_frame(sys.stdout.buffer, bytes(range(256)) * 1024)'
         if ($script:SourceFails) { $program += '; sys.exit(17)' }
     }
     else {
-        $program = 'import sys, qianyi; assert qianyi.read_ssh_frame(sys.stdin.buffer) == bytes(range(256)) * 1024'
+        $program = $fixture + 'assert qianyi.read_ssh_frame(sys.stdin.buffer) == bytes(range(256)) * 1024'
     }
     return (Start-QianyiProcess $script:Python @('-B', '-c', $program) ($Action -eq 'export-ssh'))
 }
