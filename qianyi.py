@@ -1312,6 +1312,7 @@ def connect_source(args, work):
 
 
 def send(args, host, workspace):
+    address, ssh_port, transfer_port = source_endpoint(args)
     host.legacy()
     packet = source_bundle(host)
     context, pin = ssl_server(host, workspace.path)
@@ -1321,10 +1322,10 @@ def send(args, host, workspace):
     if not args.direct:
         key = secure_read("/etc/ssh/ssh_host_ed25519_key.pub").decode().split()
         require(len(key) >= 2 and key[0] == "ssh-ed25519", "未找到有效的源机 Ed25519 SSH 主机公钥")
-        ssh_options = ["--ssh-key", ssh_host_key(key[1]), "--ssh-port", str(args.ssh_port)]
+        ssh_options = ["--ssh-key", ssh_host_key(key[1]), "--ssh-port", str(ssh_port)]
 
     def ready(port):
-        command = bootstrap_command(fingerprint, ["receive", "--host", args.host, "--port", str(port),
+        command = bootstrap_command(fingerprint, ["receive", "--host", address, "--port", str(port),
                                                   "--pin", pin, "--sha256", sha(packet), *ssh_options])
         print("保持源端终端开启。请在目标机的 root 终端运行这一行：", flush=True)
         print(command, flush=True)
@@ -1334,7 +1335,7 @@ def send(args, host, workspace):
         host.legacy(remove=True)
         workspace.cleanup()
 
-    serve_packet("0.0.0.0" if args.direct else "127.0.0.1", args.port,
+    serve_packet("0.0.0.0" if args.direct else "127.0.0.1", transfer_port,
                  context, packet, token, args.ttl, ready, cleanup)
     print("源机已发送快照并清理本轮迁移工具与临时文件。", flush=True)
 
@@ -1360,13 +1361,62 @@ def ipv4(value):
     return str(ipaddress.IPv4Address(value))
 
 
+def ssh_endpoint(connection):
+    fields = connection.split()
+    if len(fields) != 4:
+        return None, None
+    try:
+        address = ipaddress.ip_address(fields[2])
+    except ValueError:
+        address = None
+    if isinstance(address, ipaddress.IPv6Address):
+        address = address.ipv4_mapped
+    if address and (not address.is_global or address.is_multicast):
+        address = None
+    try:
+        port = port_arg(fields[3])
+    except (ValueError, argparse.ArgumentTypeError):
+        port = None
+    return str(address) if address else None, port
+
+
+def prompt_setting(label, default, parse):
+    suffix = f"（回车使用 {default}）" if default is not None else ""
+    while True:
+        try:
+            value = input(f"{label}{suffix} > ").strip()
+        except EOFError:
+            raise MigrationError(f"没有收到{label}，请在源机终端重新运行") from None
+        if not value and default is not None:
+            return default
+        try:
+            return parse(value)
+        except (ValueError, argparse.ArgumentTypeError):
+            print(f"{label}格式不正确，请重新输入。", file=sys.stderr)
+
+
+def source_endpoint(args):
+    detected_host, detected_port = ssh_endpoint(os.environ.get("SSH_CONNECTION", ""))
+    address = args.host or detected_host
+    ssh_port = args.ssh_port or detected_port or 22
+    if args.host is None and sys.stdin.isatty():
+        address = prompt_setting("目标机能连接的源机管理 IPv4", address, ipv4)
+        if not args.direct and args.ssh_port is None:
+            ssh_port = prompt_setting("源机对外的 SSH 端口", ssh_port, port_arg)
+    require(address, "未识别到源机管理 IPv4，请在源机终端运行并按提示填写")
+    # A loopback listener can use port zero. Direct mode needs a known
+    # externally reachable port, so keep its existing default.
+    transfer_port = args.port if args.port is not None else (48999 if args.direct else 0)
+    return address, ssh_port, transfer_port
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="jieshu 双 VPS 一次性轮换")
     sub = parser.add_subparsers(dest="action", required=True)
     source = sub.add_parser("send", help="从当前生产机导出，等待目标机接收")
-    source.add_argument("--host", required=True, type=ipv4, help="源机可被目标访问的管理 IPv4")
-    source.add_argument("--ssh-port", type=port_arg, default=22)
-    source.add_argument("--port", type=port_arg, default=48999)
+    source.add_argument("--host", type=ipv4, help="源机管理 IPv4（默认从 SSH 会话读取或交互填写）")
+    source.add_argument("--ssh-port", type=port_arg, help="源机 SSH 端口（默认读取当前登录端口）")
+    source.add_argument("--port", type=port_arg, help="传输端口（默认由系统分配，直连模式默认 48999）")
     source.add_argument("--ttl", type=int, choices=range(60, 3601), metavar="60–3600", default=1200)
     source.add_argument("--direct", action="store_true", help="使用已有可达的 HTTPS 端口，跳过 SSH 隧道")
     target = sub.add_parser("receive", help="接收并按端口接管 443 和临时节点")

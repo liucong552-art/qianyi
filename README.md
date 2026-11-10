@@ -11,7 +11,7 @@
 
 ## 第一步，在源机运行
 
-从源机 root 终端执行。把 `203.0.113.10` 换成目标机能连接的**源机管理 IPv4**。SSH 端口不是 22 时，追加 `--ssh-port 你的端口`。
+把下面整段原样粘贴到**源机的 root 终端**。脚本会从当前 SSH 会话读取源机地址和 SSH 端口。提示值正确时按回车即可。
 
 ```bash
 (
@@ -24,12 +24,14 @@
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' 'cf60b8a719218314c7403f3b0e7a04b7e2771da9bdb3f0073f87399f3808a62e' "$d/qianyi.py" | sha256sum -c -
-  python3 -I -B "$d/qianyi.py" send --host 203.0.113.10
+  printf '%s  %s\n' '1a9d40bed05f2199f46443f01354f4a467a62fd9a43a1cee10a03e23bd3d42dd' "$d/qianyi.py" | sha256sum -c -
+  python3 -I -B "$d/qianyi.py" send
 )
 ```
 
-保持源机终端开启。默认传输窗口 20 分钟。默认只在源机回环地址监听。若你已提供可达的专用端口，也可以在源端追加 `--direct --port 48999` 走直连 TLS，现有规则的撤销由创建者负责。
+如果通过云控制台登录，或云平台将外部 SSH 端口映射到了另一个内部端口，按提示直接输入目标机能连接的源机管理 IPv4 和对外 SSH 端口。
+
+保持源机终端开启。默认传输窗口 20 分钟。系统自动选择空闲的临时传输端口，只在源机回环地址监听。脚本会把两个端口都填进目标机命令。
 
 ## 第二步，在目标机运行
 

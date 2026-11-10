@@ -310,6 +310,45 @@ class TransactionTests(unittest.TestCase):
             q.decode_bundle(packet([node("main", 443), node("vless-temp-a", 40000), node("vless-temp-b", 40000)]))
 
 
+class SourceEndpointTests(unittest.TestCase):
+    def settings(self, connection, argv=(), replies=None):
+        with patch.dict(os.environ, {"SSH_CONNECTION": connection}), \
+                patch.object(q.sys.stdin, "isatty", return_value=replies is not None), \
+                patch("builtins.input", side_effect=replies) as prompt:
+            value = q.source_endpoint(q.parse_args(["send", *argv]))
+            return value, prompt.call_args_list
+
+    def test_detected_custom_ssh_port_is_default_and_transport_is_ephemeral(self):
+        result, prompts = self.settings("192.0.2.1 50000 8.8.8.8 22022", replies=["", ""])
+        self.assertEqual(result, ("8.8.8.8", 22022, 0))
+        self.assertIn("22022", prompts[1].args[0])
+
+    def test_private_server_address_and_external_mapping_can_be_entered(self):
+        result, prompts = self.settings("192.0.2.1 50000 10.0.0.5 22", replies=["203.0.113.10", "2222"])
+        self.assertEqual(result, ("203.0.113.10", 2222, 0))
+        self.assertNotIn("10.0.0.5", prompts[0].args[0])
+
+    def test_console_uses_22_when_no_ssh_session(self):
+        result, prompts = self.settings("", replies=["203.0.113.10", ""])
+        self.assertEqual(result, ("203.0.113.10", 22, 0))
+        self.assertIn("22", prompts[1].args[0])
+
+    def test_mapped_ipv4_and_noninteractive_cli(self):
+        result, prompts = self.settings("192.0.2.1 50000 ::ffff:8.8.8.8 22022")
+        self.assertEqual(result, ("8.8.8.8", 22022, 0))
+        self.assertEqual(prompts, [])
+
+    def test_explicit_overrides_and_direct_mode_remain_supported(self):
+        login = "192.0.2.1 50000 8.8.8.8 22022"
+        explicit, prompts = self.settings(login, ["--host", "203.0.113.10", "--ssh-port", "22",
+                                                 "--port", "49000"], replies=[])
+        self.assertEqual(explicit, ("203.0.113.10", 22, 49000))
+        self.assertEqual(prompts, [])
+        direct, prompts = self.settings(login, ["--direct"], replies=[""])
+        self.assertEqual(direct, ("8.8.8.8", 22022, 48999))
+        self.assertEqual(len(prompts), 1)
+
+
 class TransportTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("openssl"), "OpenSSL is required")
     def test_pinned_transfer_proves_source_workspace_removed(self):
