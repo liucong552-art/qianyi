@@ -1042,7 +1042,12 @@ source {LIB}/iplimit-lib.sh
         priority = number(settings.get("RULE_PRIORITY"), "RULE_PRIORITY", 1, 32765)
         require(mark > 0 and table not in (253, 254, 255) and self.active(f"wg-quick@{iface}.service"),
                 f"端口 {node.port} 需要目标机已运行的 WireGuard {iface}")
-        route = decode_json(self.run("ip", "-j", "route", "get", "1.1.1.1", "mark", str(mark)).stdout)
+        result = self.run("ip", "-j", "route", "get", "1.1.1.1", "mark", str(mark), check=False)
+        detail = " ".join(result.stderr.split())[:300] or f"退出码 {result.returncode}"
+        require(result.returncode == 0,
+                f"端口 {node.port} 的目标 WireGuard {iface} 标记路由查询失败"
+                f"（mark={mark}，table={table}）。{detail}。尚未替换目标节点，请先检查目标机 WG-NAT 出口")
+        route = decode_json(result.stdout)
         require(route and route[0].get("dev") == iface, f"端口 {node.port} 的 WireGuard 标记路由未就绪")
         rows = self.run("wg", "show", iface, "latest-handshakes").stdout.splitlines()
         recent = max((int(row.split()[1]) for row in rows if len(row.split()) == 2), default=0)

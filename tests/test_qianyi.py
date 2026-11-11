@@ -156,7 +156,7 @@ class FakeHost(q.Host):
 
     def run(self, *args, **_kwargs):
         if args[0] == "ip":
-            return SimpleNamespace(stdout='[{"dev":"wg-nat"}]')
+            return SimpleNamespace(returncode=0, stdout='[{"dev":"wg-nat"}]', stderr="")
         if args[0] == "wg":
             return SimpleNamespace(stdout=f"peer\t{int(time.time())}\n")
         if args == ("ss", "-H", "-aun"):
@@ -400,6 +400,22 @@ class TransactionTests(unittest.TestCase):
         self.assertIsNone(daily)
         self.assertEqual({value.port for value in next_nodes}, {443, 40000, 40001, 40002})
         self.assertEqual(next(value for value in next_nodes if value.port == 40000).quota["LIMIT_BYTES"], "40")
+
+    def test_nat_route_failure_reports_reason_without_target_mutation(self):
+        original_run = self.host.run
+
+        def fail_route(*args, **kwargs):
+            if args[0] == "ip":
+                return SimpleNamespace(returncode=2, stdout="", stderr="RTNETLINK answers: Network is unreachable\n")
+            return original_run(*args, **kwargs)
+
+        with patch.object(self.host, "run", side_effect=fail_route), \
+                self.assertRaisesRegex(q.MigrationError, "mark=8080.*Network is unreachable.*尚未替换目标节点"):
+            q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40000, nat=True)]))
+        self.assertEqual(self.current(443).url, self.main.url)
+        self.assertEqual(self.current(40000).url, self.old.url)
+        self.assertEqual(self.host.actions, [])
+        self.assert_clean()
 
     def test_failed_start_restores_previous_main_limits_and_ip_slots(self):
         new = node("vless-temp-new", 40000)

@@ -25,7 +25,7 @@
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
         $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
-        if ($hash -ne '1e1931cf325a37779dfa1689dbc2f63a405205225cdb48affa71eef77ee6eddc') {
+        if ($hash -ne 'b6402be10d8f73a16d8201c99c2d27474ae2c87800cd095744bbf74b188c27f5') {
             throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
         }
     }
@@ -59,7 +59,7 @@ Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' 'ce66b01e0e5afb1db69056a9a7bbb777983caf87cbe0f1aad79adb8158d2c58f' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' 'b1531787566de709d73fb1aa037d29d407fb3ba8dea7117a8614464734542213' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```
