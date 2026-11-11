@@ -9,6 +9,7 @@
 - WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，迁入节点改用目标机的 mark、路由表和优先级。
 - 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
 - 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
+- 源机已安装 `vless_traffic` 时，导出前会采集一次，将 443 和迁入临时节点最近 30 个北京时间自然日的每日流量一同带走。目标机会用自己的计数器继续累计，并保留其他节点的历史。目标机缺少该组件时，工具会自动安装经过版本校验的原生统计程序。
 
 ## Windows 一键迁移
 
@@ -24,7 +25,7 @@
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
         $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
-        if ($hash -ne '35c6dab577a5ae5b7834fb6a41e6abaf4accfce234a9293117353c6882875594') {
+        if ($hash -ne '1e1931cf325a37779dfa1689dbc2f63a405205225cdb48affa71eef77ee6eddc') {
             throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
         }
     }
@@ -58,7 +59,7 @@ Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' 'ceed30ced2f92da48976cd6ec461a6c29fb16c80de652bb552cf6dd641be025e' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' 'ce66b01e0e5afb1db69056a9a7bbb777983caf87cbe0f1aad79adb8158d2c58f' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```
@@ -74,6 +75,8 @@ Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机
 3. 确认新机接管后，自行重装旧机。下次由这轮的目标机执行第一步。
 
 原链接、节点凭据、到期时间、配额总量、快照时已用量、重置周期和 IP 限制配置随节点迁入。IP 黏性集合属于本机运行状态，迁移到新机时从空集合开始。DNS 并行期两台机器分别计数。443 接管会更新目标机的主节点配置、发布链接和相关默认值，并保留目标机的 IPv6 发布设置、Xray 安装及 WireGuard 配置。
+
+每日流量只包含导出时已采集的历史，源机在导出后的新用量仍留在源机。目标同端口被接管时，该节点的每日历史采用源机记录，其他节点继续保留自己的记录。为了补每日历史而重复导入旧源机的整份迁移包，会覆盖目标机已经新增的配额用量。每日流量是原生业务数据，会随统计组件保存在目标机。
 
 ## 清理和失败恢复
 

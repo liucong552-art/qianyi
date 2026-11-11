@@ -1,6 +1,6 @@
 # Windows PowerShell 5.1 and later. Credentials stay in the local SSH client.
 $ErrorActionPreference = 'Stop'
-$QianyiPythonHash = 'ceed30ced2f92da48976cd6ec461a6c29fb16c80de652bb552cf6dd641be025e'
+$QianyiPythonHash = 'ce66b01e0e5afb1db69056a9a7bbb777983caf87cbe0f1aad79adb8158d2c58f'
 $QianyiFrameLimit = 32MB + 8192 + 128
 $QianyiLinuxBootstrap = @'
 set -eu

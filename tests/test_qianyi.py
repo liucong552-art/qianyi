@@ -2,10 +2,12 @@ import base64
 import contextlib
 import copy
 from dataclasses import asdict
+import datetime as dt
 from io import BytesIO
 import os
 from pathlib import Path
 import queue
+import re
 import shlex
 import shutil
 import socket
@@ -62,9 +64,64 @@ def node(tag, port, *, quota=False, iplimit=False, nat=False, label="source"):
     return q.Node(tag, port, meta, config, url, limits, slots)
 
 
-def packet(nodes, origin="a" * 64, blacklist=()):
+def packet(nodes, origin="a" * 64, blacklist=(), daily=None):
     return q.encode_json(dict(format=q.FORMAT, origin=origin, profile={"test": "profile"},
-                              nodes=[asdict(n) for n in nodes], blacklist=list(blacklist)))
+                              nodes=[asdict(n) for n in nodes], blacklist=list(blacklist), daily=daily))
+
+
+DAILY_PROGRAM = (Path(__file__).parent / "fixtures/jieshu_traffic.py").read_bytes()
+
+
+class DailyKernel:
+    def __init__(self):
+        self.exists = False
+        self.counters = {}
+        self.rules = []
+
+    def snapshot(self):
+        if not self.exists:
+            return []
+        rows = [{"table": {"family": "inet", "name": q.TRAFFIC_TABLE}}]
+        rows += [{"chain": {"name": name, "type": "filter", "hook": name, "prio": 10, "policy": "accept"}}
+                 for name in ("input", "output")]
+        rows += [{"counter": {"name": name, "bytes": value}} for name, value in self.counters.items()]
+        return rows + [{"rule": rule} for rule in self.rules]
+
+    def apply(self, commands):
+        for command in commands:
+            parts = command.split()
+            if command.startswith("add table "):
+                self.exists = True
+            elif command.startswith("add chain "):
+                continue
+            elif command.startswith("add counter "):
+                self.counters[parts[-1]] = 0
+            elif command.startswith("delete counter "):
+                del self.counters[parts[-1]]
+            elif command.startswith("flush chain "):
+                self.rules = [rule for rule in self.rules if rule["chain"] != parts[-1]]
+            elif command.startswith("add rule "):
+                chain, field, port, name = parts[4], parts[6], int(parts[7]), parts[10]
+                self.rules.append({"chain": chain, "comment": name, "expr": [
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": field}}, "right": port}},
+                    {"counter": name},
+                ]})
+            else:
+                raise AssertionError(command)
+
+    def add(self, key, upload=0, download=0):
+        for direction, amount in (("u", upload), ("d", download)):
+            name, = [name for name in self.counters if name.startswith(f"t_{key}_") and name.endswith(f"_{direction}")]
+            self.counters[name] += amount
+
+
+def daily_payload(nodes, upload=1000, download=2000):
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+    sampled = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
+    return {"program_sha256": q.TRAFFIC_SHA256, "users": {
+        node.tag: {"tag": node.tag, "port": node.port, "key": q.daily_key(node),
+                   "days": {today: {"upload": upload, "download": download}}, "sampled_at": sampled}
+        for node in nodes}}
 
 
 class FakeHost(q.Host):
@@ -80,6 +137,12 @@ class FakeHost(q.Host):
         self.restored_slots = []
         self.cidr_rules = None
         self.legacy_rules = set()
+        self.daily_kernel = DailyKernel()
+
+    def daily_module(self, program):
+        module = super().daily_module(program)
+        module.Nft = lambda: self.daily_kernel
+        return module
 
     @contextlib.contextmanager
     def lock(self, *_names):
@@ -187,9 +250,14 @@ class FakeHost(q.Host):
             tables.add(q.CIDR_TABLE)
         if self.legacy_rules:
             tables.add("jsh_ipban")
+        if self.daily_kernel.exists:
+            tables.add(q.TRAFFIC_TABLE)
         return tables
 
     def nft(self, commands):
+        if commands == f"delete table inet {q.TRAFFIC_TABLE}":
+            self.daily_kernel = DailyKernel()
+            return
         prefix = f"add rule inet {q.CIDR_TABLE} pre "
         handles = dict(enumerate(sorted(self.cidr_rules or set()), 1))
         for line in commands.splitlines():
@@ -239,7 +307,8 @@ class TransactionTests(unittest.TestCase):
         tmp = self.enterContext(tempfile.TemporaryDirectory())
         root = Path(tmp)
         state, systemd, xray, run = (root / name for name in ("state", "systemd", "xray", "run"))
-        for path in (state / "temp", state / "main", state / "quota", state / "iplimit", systemd, xray, run):
+        program = root / "sbin/vless_traffic"
+        for path in (state / "temp", state / "main", state / "quota", state / "iplimit", systemd, xray, run, program.parent):
             path.mkdir(parents=True)
         main = {"meta": str(state / "main/main.env"), "config": str(xray / "config.json"),
                 "url": str(root / "main.url")}
@@ -248,6 +317,7 @@ class TransactionTests(unittest.TestCase):
                                          MAIN_DEFAULTS=str(root / "defaults"),
                                          CIDR_STATE=str(root / "jsh-cidrban.nft"),
                                          LEGACY_BAN_STATE=str(root / "jsh-ipban.nft"),
+                                         TRAFFIC_PROGRAM=str(program),
                                          JOURNAL=str(state / ".qianyi-recovery.json"), LEGACY={},
                                          permit_file=lambda table: run / f"{table}.permit"))
         def fixture_read(path, _maximum=q.MAX_STATE_FILE):
@@ -287,6 +357,24 @@ class TransactionTests(unittest.TestCase):
         self.host.enabled_units.add(q.CIDR_UNIT)
         return data
 
+    def setup_daily(self):
+        Path(q.TRAFFIC_PROGRAM).write_bytes(DAILY_PROGRAM)
+        for name, content in q.TRAFFIC_UNITS.items():
+            (Path(q.SYSTEMD) / name).write_text(content)
+        self.host.enabled_units.update(q.TRAFFIC_ENABLED)
+        self.host.active_units.update(q.TRAFFIC_ENABLED)
+        module = self.host.daily_module(DAILY_PROGRAM)
+        self.host.collect_daily(module)
+        for record, upload, download in ((self.main, 10, 20), (self.old, 100, 200), (self.keep, 500, 600)):
+            self.host.daily_kernel.add(q.daily_key(record), upload, download)
+        self.host.collect_daily(module)
+        return module
+
+    def daily_counts(self, tag):
+        state = q.decode_json(q.daily_path().read_bytes())
+        today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+        return state["users"][tag]["days"][today]
+
     def test_replace_443_and_matching_port_keep_disjoint_and_remap_tag(self):
         incoming_main = node("main", 443, quota=True)
         replacing = node("vless-temp-keep", 40000, quota=True, iplimit=True, nat=True)
@@ -306,9 +394,10 @@ class TransactionTests(unittest.TestCase):
         self.assertNotIn(self.old.unit, self.host.enabled_units)
         self.assertFalse(any(self.keep.unit in action[1:] for action in self.host.actions))
         self.assert_clean()
-        origin, _, next_nodes, bans = q.decode_bundle(q.source_bundle(self.host))
+        origin, _, next_nodes, bans, daily = q.decode_bundle(q.source_bundle(self.host))
         self.assertEqual(origin, self.host.identity())
         self.assertFalse(bans)
+        self.assertIsNone(daily)
         self.assertEqual({value.port for value in next_nodes}, {443, 40000, 40001, 40002})
         self.assertEqual(next(value for value in next_nodes if value.port == 40000).quota["LIMIT_BYTES"], "40")
 
@@ -372,7 +461,7 @@ class TransactionTests(unittest.TestCase):
         wanted = {(40000, "192.0.2.0/24"), (40001, "198.51.100.25/32")}
         self.setup_cidr_rules({(40000, "192.0.2.0/24"), (40024, "203.0.113.2/32")})
         self.host.legacy_rules = {(40001, "198.51.100.25/32")}
-        _, _, _, bans = q.decode_bundle(q.source_bundle(self.host))
+        _, _, _, bans, _ = q.decode_bundle(q.source_bundle(self.host))
         self.assertEqual(bans, wanted)
         self.assertEqual(self.host.actions, [])
 
@@ -421,6 +510,92 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(self.host.enabled(q.CIDR_UNIT))
         self.assert_clean()
 
+    def test_daily_history_replaces_same_identity_and_keeps_target_baselines(self):
+        module = self.setup_daily()
+        nodes = [copy.deepcopy(self.main), copy.deepcopy(self.old)]
+        q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 1000, "download": 2000})
+        self.assertEqual(self.daily_counts(self.keep.tag), {"upload": 500, "download": 600})
+        self.host.collect_daily(module)
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 1000, "download": 2000})
+        self.host.daily_kernel.add(q.daily_key(self.old), 7, 9)
+        self.host.collect_daily(module)
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 1007, "download": 2009})
+        self.assert_clean()
+
+    def test_daily_history_follows_a_remapped_tag_and_preserves_other_nodes(self):
+        self.setup_daily()
+        nodes = [node("main", 443), node(self.keep.tag, 40000)]
+        q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        remapped = self.current(40000)
+        self.assertNotEqual(remapped.tag, self.keep.tag)
+        self.assertEqual(self.daily_counts(remapped.tag), {"upload": 1000, "download": 2000})
+        self.assertEqual(self.daily_counts(self.keep.tag), {"upload": 500, "download": 600})
+        saved = q.decode_json(q.daily_path().read_bytes())["users"][remapped.tag]
+        self.assertEqual(saved["key"], q.daily_key(remapped))
+        self.assert_clean()
+
+    def test_failed_migration_restores_daily_history_and_recounts_no_old_bytes(self):
+        module = self.setup_daily()
+        nodes = [node("main", 443), node("vless-temp-new", 40000)]
+        self.host.fail_start = nodes[1].unit
+        with self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
+            q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 100, "download": 200})
+        self.assertEqual(self.daily_counts(self.main.tag), {"upload": 10, "download": 20})
+        self.host.daily_kernel.add(q.daily_key(self.keep), 3, 4)
+        self.host.collect_daily(module)
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 100, "download": 200})
+        self.assertEqual(self.daily_counts(self.keep.tag), {"upload": 503, "download": 604})
+        self.assert_clean()
+
+    def test_daily_component_is_installed_when_the_target_does_not_have_it(self):
+        nodes = [node("main", 443), node("vless-temp-new", 40000)]
+        with patch.object(q, "urlopen", return_value=BytesIO(DAILY_PROGRAM)):
+            q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        self.assertEqual(Path(q.TRAFFIC_PROGRAM).read_bytes(), DAILY_PROGRAM)
+        self.assertEqual(self.daily_counts(nodes[1].tag), {"upload": 1000, "download": 2000})
+        self.assertTrue(all(self.host.active(unit) and self.host.enabled(unit) for unit in q.TRAFFIC_ENABLED))
+        self.assert_clean()
+
+    def test_failed_install_removes_new_daily_component_and_its_files(self):
+        nodes = [node("main", 443), node("vless-temp-new", 40000)]
+        self.host.fail_start = nodes[1].unit
+        with patch.object(q, "urlopen", return_value=BytesIO(DAILY_PROGRAM)), \
+                self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
+            q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        self.assertFalse(any(path.exists() for path in q.daily_files()))
+        self.assertFalse(q.daily_path().parent.exists())
+        self.assertFalse(self.host.daily_kernel.exists)
+        self.assert_clean()
+
+    def test_source_samples_unsaved_daily_bytes_and_exports_only_portable_history(self):
+        module = self.setup_daily()
+        self.host.daily_kernel.add(q.daily_key(self.old), 7, 9)
+        state = module.load_state(q.daily_path())
+        ancient = (dt.datetime.now(module.TZ).date() - dt.timedelta(days=30)).isoformat()
+        state["users"][self.old.tag]["days"][ancient] = {"upload": 999, "download": 999}
+        module.save_state(q.daily_path(), state)
+        _, _, _, _, daily = q.decode_bundle(q.source_bundle(self.host))
+        records = daily["users"]
+        self.assertNotIn("last", records[self.old.tag])
+        self.assertNotIn(ancient, records[self.old.tag]["days"])
+        self.assertEqual(self.daily_counts(self.old.tag), {"upload": 107, "download": 209})
+        today = dt.datetime.now(module.TZ).date().isoformat()
+        self.assertEqual(records[self.old.tag]["days"][today], {"upload": 107, "download": 209})
+
+    def test_publish_recovery_keeps_daily_bytes_used_after_commit(self):
+        module = self.setup_daily()
+        nodes = [node("main", 443), node("vless-temp-new", 40000)]
+        self.host.fail_publish = True
+        with self.assertRaisesRegex(q.MigrationError, "清理"):
+            q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+        self.host.daily_kernel.add(q.daily_key(nodes[1]), 7, 9)
+        self.host.collect_daily(module)
+        q.recover_target(self.host)
+        self.assertEqual(self.daily_counts(nodes[1].tag), {"upload": 1007, "download": 2009})
+        self.assert_clean()
+
 
 class BlacklistFormatTests(unittest.TestCase):
     def test_native_listing_supports_numeric_protocols_and_counter_values(self):
@@ -454,6 +629,51 @@ class BlacklistFormatTests(unittest.TestCase):
 add set inet jsh_ipban banned { type ipv4_addr . inet_service; }
 add element inet jsh_ipban banned { 192.0.2.7 . 40024, 192.0.2.8 . 40025 }""")
                 self.assertEqual(host.source_blacklist({40024}), {old, (40024, "192.0.2.7/32")})
+
+    @unittest.skipUnless(os.environ.get("QIANyi_NFT_NETNS") == "1", "requires an isolated nftables namespace")
+    def test_kernel_daily_history_uses_local_baselines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "temp").mkdir()
+            (root / "main").mkdir()
+            item = node("main", 443)
+            (root / "main/main.env").write_bytes(q.env_encode(item.meta))
+            program = root / "vless_traffic"
+            program.write_bytes(DAILY_PROGRAM)
+            with patch.multiple(q, STATE=str(root), TRAFFIC_PROGRAM=str(program)):
+                host = q.Host(root)
+                host.run("ip", "link", "set", "lo", "up")
+                module = host.daily_module(DAILY_PROGRAM)
+                host.collect_daily(module)
+
+                def transfer():
+                    with socket.socket() as server:
+                        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        server.bind(("127.0.0.1", 443))
+                        server.listen(1)
+                        def receive():
+                            conn, _ = server.accept()
+                            with conn:
+                                conn.recv(100)
+                        thread = threading.Thread(target=receive)
+                        thread.start()
+                        with socket.create_connection(("127.0.0.1", 443)) as client:
+                            client.sendall(b"x" * 100)
+                        thread.join(timeout=3)
+                        self.assertFalse(thread.is_alive())
+
+                transfer()
+                old = host.collect_daily(module)
+                today = dt.datetime.now(module.TZ).date().isoformat()
+                self.assertGreater(old["users"]["main"]["days"][today]["upload"], 0)
+                records = daily_payload([item], upload=10000, download=20000)["users"]
+                plan = {"program": base64.b64encode(DAILY_PROGRAM).decode()}
+                host.merge_daily(plan, records)
+                sampled = host.collect_daily(module)
+                self.assertEqual(sampled["users"]["main"]["days"][today], {"upload": 10000, "download": 20000})
+                transfer()
+                sampled = host.collect_daily(module)
+                self.assertGreater(sampled["users"]["main"]["days"][today]["upload"], 10000)
 
 
 class SourceEndpointTests(unittest.TestCase):

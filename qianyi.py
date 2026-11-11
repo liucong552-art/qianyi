@@ -6,6 +6,7 @@ import base64
 import contextlib
 import copy
 from dataclasses import asdict, dataclass
+import datetime as dt
 import fcntl
 import getpass
 import hashlib
@@ -25,7 +26,9 @@ import stat
 import subprocess
 import sys
 import time
+from types import ModuleType
 from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.request import urlopen
 from uuid import UUID
 
 
@@ -50,6 +53,50 @@ MAIN_FILES = {
 MAIN_SUB = "/root/v2ray_subscription_base64.txt"
 MAIN_DEFAULTS = "/etc/default/vless-reality"
 JOURNAL = f"{STATE}/.qianyi-recovery.json"
+TRAFFIC_PROGRAM = "/usr/local/sbin/vless_traffic"
+TRAFFIC_SHA256 = "8aba583afe39c5c8ad21efa6c4b2616ef4f47080d5810484a194b3ea5979af49"
+TRAFFIC_URL = "https://raw.githubusercontent.com/liucong552-art/jieshu/3e1972393cd9e6f097b27b76f919a649def61ae4/traffic.py"
+TRAFFIC_TABLE = "vr_daily_traffic"
+TRAFFIC_UNITS = {
+    "vless-traffic.service": """[Unit]
+Description=Collect daily VLESS traffic
+After=local-fs.target nftables.service vless-managed-restore.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vless_traffic --collect
+TimeoutStartSec=120
+UMask=0077
+""",
+    "vless-traffic.timer": """[Unit]
+Description=Collect and prune daily VLESS traffic every minute
+
+[Timer]
+OnBootSec=30s
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+""",
+    "vless-traffic-shutdown.service": """[Unit]
+Description=Save daily VLESS traffic before shutdown
+After=local-fs.target nftables.service vless-managed-restore.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/vless_traffic --collect
+TimeoutStopSec=120
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+""",
+}
+TRAFFIC_ENABLED = ("vless-traffic-shutdown.service", "vless-traffic.timer")
 CIDR_TABLE = "jsh_cidrban"
 CIDR_STATE = "/etc/jsh-cidrban.nft"
 CIDR_UNIT = "jsh-cidrban.service"
@@ -389,6 +436,64 @@ def unique_nodes(nodes):
             "发现重复节点端口或标识")
 
 
+def daily_path():
+    return Path(STATE) / "traffic/daily.json"
+
+
+def daily_files():
+    return {Path(TRAFFIC_PROGRAM), daily_path()} | {Path(SYSTEMD) / name for name in TRAFFIC_UNITS}
+
+
+def daily_key(node):
+    created = "" if node.main else node.meta.get("CREATE_EPOCH", "")
+    identity = f"{node.tag}|{node.port}|{str(UUID(node.meta['UUID']))}|{created}"
+    return sha(identity.encode())[:32]
+
+
+def portable_daily(record):
+    return {key: copy.deepcopy(record[key]) for key in ("tag", "port", "key", "days", "sampled_at")}
+
+
+def validate_daily_records(records, nodes):
+    by_tag = {node.tag: node for node in nodes}
+    require(isinstance(records, dict) and set(records) <= set(by_tag), "每日流量包含未迁移的节点")
+    for tag, record in records.items():
+        node = by_tag[tag]
+        require(isinstance(record, dict) and set(record) == {"tag", "port", "key", "days", "sampled_at"}
+                and record["tag"] == tag and type(record["port"]) is int and record["port"] == node.port
+                and record["key"] == daily_key(node), f"每日流量与端口 {node.port} 的节点身份不符")
+        require(isinstance(record["days"], dict) and len(record["days"]) <= 30, "每日流量日期条数异常")
+        for day, value in record["days"].items():
+            require(isinstance(day, str) and dt.date.fromisoformat(day).isoformat() == day
+                    and isinstance(value, dict) and set(value) == {"upload", "download"}
+                    and all(type(count) is int and 0 <= count <= 9_000_000_000_000_000_000
+                            for count in value.values()), f"端口 {node.port} 的每日流量数据异常")
+        require(isinstance(record["sampled_at"], str)
+                and dt.datetime.fromisoformat(record["sampled_at"]).tzinfo is not None,
+                f"端口 {node.port} 的每日流量采样时间异常")
+
+
+def validate_daily_payload(daily, nodes):
+    require(isinstance(daily, dict) and set(daily) == {"program_sha256", "users"}
+            and daily["program_sha256"] == TRAFFIC_SHA256, "每日流量组件版本不支持")
+    validate_daily_records(daily["users"], nodes)
+
+
+def validate_daily_plan(plan, new, old):
+    require(isinstance(plan, dict) and set(plan) == {"install", "directory_created", "program", "incoming", "before"}
+            and type(plan["install"]) is bool and type(plan["directory_created"]) is bool,
+            "每日流量恢复记录异常")
+    validate_daily_records(plan["incoming"], new)
+    validate_daily_records(plan["before"], old)
+    require(isinstance(plan["program"], str) and len(plan["program"]) <= MAX_STATE_FILE * 2
+            and sha(base64.b64decode(plan["program"], validate=True)) == TRAFFIC_SHA256,
+            "每日流量恢复程序校验失败")
+
+
+def daily_guard_units(plan):
+    return {"vless-traffic.service", "vless-traffic-shutdown.service"} if plan and plan["install"] else set()
+
+
 def ban_entry(port, network):
     require(type(port) is int and 1 <= port <= 65535 and isinstance(network, str)
             and bool(re.fullmatch(r"[0-9.]+(?:/\d{1,2})?", network)), "黑名单条目格式无效")
@@ -477,7 +582,7 @@ def ban_plan_state(plan, ports):
 def decode_bundle(packet):
     bundle = decode_json(packet)
     fields = {"format", "profile", "nodes", "origin"}
-    require(isinstance(bundle, dict) and set(bundle) - {"blacklist"} == fields
+    require(isinstance(bundle, dict) and set(bundle) - {"blacklist", "daily"} == fields
             and bundle["format"] == FORMAT and isinstance(bundle["origin"], str) and HEX.fullmatch(bundle["origin"]),
             "迁移包版本不支持")
     require(isinstance(bundle["nodes"], list) and 1 <= len(bundle["nodes"]) <= 512
@@ -486,7 +591,10 @@ def decode_bundle(packet):
     unique_nodes(nodes)
     require(any(n.main for n in nodes), "迁移包缺少 443 主节点")
     bans = ban_entries(bundle.get("blacklist", []), {node.port for node in nodes})
-    return bundle["origin"], bundle["profile"], nodes, bans
+    daily = bundle.get("daily")
+    if daily is not None:
+        validate_daily_payload(daily, nodes)
+    return bundle["origin"], bundle["profile"], nodes, bans, daily
 
 
 def plan_nodes(incoming, current):
@@ -1058,6 +1166,155 @@ fi""", node.port, "main" if node.main else "temp", node.family)
             time.sleep(1)
         raise MigrationError("等待节点稳定监听超时，请查看目标机对应的 systemd 服务")
 
+    def daily_module(self, program):
+        require(sha(program) == TRAFFIC_SHA256, "vless_traffic 版本不支持，请先对齐原生统计组件")
+        module = ModuleType("qianyi_native_daily")
+        module.__file__ = TRAFFIC_PROGRAM
+        exec(compile(program, TRAFFIC_PROGRAM, "exec"), module.__dict__)
+        module.STATE = Path(STATE)
+        module.PROGRAM = Path(TRAFFIC_PROGRAM)
+        module.UNIT_DIR = Path(SYSTEMD)
+        return module
+
+    def collect_daily(self, module):
+        # The caller holds temp.lock, also taken by every native collector entry.
+        path = daily_path()
+        require(path.resolve() == path, "每日流量状态路径为符号链接")
+        if exists(path):
+            secure_read(path, MAX_PACKET)
+        try:
+            return module.collect(root=Path(STATE))
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+            raise MigrationError("每日流量采集失败，请先检查原生 vless_traffic 是否能正常运行") from None
+
+    def source_daily(self, nodes):
+        if not exists(TRAFFIC_PROGRAM):
+            require(not exists(daily_path()), "源机有每日流量历史但缺少 vless_traffic 程序")
+            return None
+        program = secure_read(TRAFFIC_PROGRAM)
+        state = self.collect_daily(self.daily_module(program))
+        records = {node.tag: portable_daily(state["users"][node.tag]) for node in nodes
+                   if node.tag in state["users"]}
+        payload = {"program_sha256": TRAFFIC_SHA256, "users": records}
+        validate_daily_payload(payload, nodes)
+        return payload
+
+    def prepare_daily(self, daily, incoming, nodes):
+        installed = exists(TRAFFIC_PROGRAM)
+        if installed:
+            program = secure_read(TRAFFIC_PROGRAM)
+        else:
+            require(not exists(daily_path()) and TRAFFIC_TABLE not in self.tables(),
+                    "目标机有每日流量残留但缺少原生统计程序，请先检查")
+            for name in TRAFFIC_UNITS:
+                path = Path(SYSTEMD) / name
+                require(not exists(path) and not exists(path.parent / f"{name}.d")
+                        and self.property(name, "LoadState") == "not-found",
+                        f"目标机已有无法归属的每日流量服务 {name}")
+            try:
+                with urlopen(TRAFFIC_URL, timeout=25) as response:
+                    program = response.read(MAX_STATE_FILE + 1)
+            except OSError:
+                raise MigrationError("目标机下载原生每日流量组件失败，请检查 GitHub 网络") from None
+        self.daily_module(program)
+        paths = daily_files() if not installed else {daily_path()}
+        for path in paths:
+            require(path.resolve() == path and not exists(pending_file(path)),
+                    f"每日流量路径异常或有未完成写入 {path}")
+        records = {}
+        for original, node in zip(incoming, nodes, strict=True):
+            if original.tag in daily["users"]:
+                record = copy.deepcopy(daily["users"][original.tag])
+                record.update(tag=node.tag, port=node.port, key=daily_key(node))
+                records[node.tag] = record
+        validate_daily_records(records, nodes)
+        return {"install": not installed, "directory_created": not daily_path().parent.exists(),
+                "program": base64.b64encode(program).decode(), "incoming": records, "before": {}}
+
+    def capture_daily_before(self, plan, old):
+        if not plan["install"]:
+            module = self.daily_module(base64.b64decode(plan["program"], validate=True))
+            state = self.collect_daily(module)
+            plan["before"] = {node.tag: portable_daily(state["users"][node.tag]) for node in old
+                              if node.tag in state["users"]}
+            validate_daily_records(plan["before"], old)
+
+    def merge_daily(self, plan, records):
+        module = self.daily_module(base64.b64decode(plan["program"], validate=True))
+        state = self.collect_daily(module)
+        for tag, saved in records.items():
+            record = state["users"].get(tag)
+            if record is not None:
+                require(record["key"] == saved["key"] and record["port"] == saved["port"],
+                        f"每日流量节点归属在迁移期间改变 {tag}")
+                # Keep the just-collected target baselines. Source counter names
+                # and byte baselines are never attached to the destination.
+                record["days"] = copy.deepcopy(saved["days"])
+        now = dt.datetime.now(module.TZ)
+        module.prune(state, module.discover(Path(STATE), now), now.date())
+        module.save_state(daily_path(), state)
+
+    def apply_daily(self, plan):
+        if plan["install"]:
+            write_file(TRAFFIC_PROGRAM, base64.b64decode(plan["program"], validate=True), 0o755)
+            for name, content in TRAFFIC_UNITS.items():
+                write_file(Path(SYSTEMD) / name, content.encode(), 0o644)
+        self.merge_daily(plan, plan["incoming"])
+        self.verify_daily(plan)
+
+    def verify_daily(self, plan):
+        module = self.daily_module(secure_read(TRAFFIC_PROGRAM))
+        state = module.load_state(daily_path())
+        now = dt.datetime.now(module.TZ)
+        nodes = module.discover(Path(STATE), now)
+        cutoff = (now.date() - dt.timedelta(days=29)).isoformat()
+        today = now.date().isoformat()
+        for tag, saved in plan["incoming"].items():
+            if tag not in nodes:
+                continue
+            actual = state["users"].get(tag)
+            require(actual is not None and actual["key"] == nodes[tag]["key"] == saved["key"],
+                    f"每日流量没有正确接续节点 {tag}")
+            for day, count in saved["days"].items():
+                if cutoff <= day <= today:
+                    require(day in actual["days"] and all(actual["days"][day][key] >= value
+                            for key, value in count.items()), f"每日流量历史不完整 {tag}")
+
+    def finish_daily(self, plan):
+        self.verify_daily(plan)
+        if plan["install"]:
+            for name, content in TRAFFIC_UNITS.items():
+                require(secure_read(Path(SYSTEMD) / name) == content.encode(), "每日流量服务归属异常")
+            self.sys("enable", *TRAFFIC_ENABLED)
+            self.sys("start", *TRAFFIC_ENABLED)
+            require(all(self.active(unit) for unit in TRAFFIC_ENABLED), "每日流量自动采集未启动")
+
+    def restore_daily(self, plan):
+        if not plan["install"]:
+            self.merge_daily(plan, plan["before"])
+            return
+        require(not any(self.active(unit) for unit in TRAFFIC_UNITS),
+                "新装的每日流量组件被外部启动，请检查后再恢复")
+        for name, content in TRAFFIC_UNITS.items():
+            path = Path(SYSTEMD) / name
+            if exists(path):
+                require(secure_read(path) == content.encode(), f"每日流量服务归属异常 {name}")
+                if name in TRAFFIC_ENABLED:
+                    self.sys("disable", name)
+                remove_file(path)
+        if exists(TRAFFIC_PROGRAM):
+            require(sha(secure_read(TRAFFIC_PROGRAM)) == TRAFFIC_SHA256, "每日流量程序被外部改动")
+            remove_file(TRAFFIC_PROGRAM)
+        if TRAFFIC_TABLE in self.tables():
+            self.nft(f"delete table inet {TRAFFIC_TABLE}")
+        if exists(daily_path()):
+            secure_read(daily_path(), MAX_PACKET)
+            remove_file(daily_path())
+        if plan["directory_created"] and daily_path().parent.is_dir():
+            daily_path().parent.rmdir()
+            fsync_directory(daily_path().parent.parent)
+        self.sys("daemon-reload")
+
     def legacy(self, *, remove=False):
         for path, digest in LEGACY.items():
             if exists(path):
@@ -1085,9 +1342,10 @@ def source_bundle(host):
             host.capture_quota(node)
         profile = host.profile(any(node.nat for node in nodes))
         blacklist = host.source_blacklist(set(by_port))
+        daily = host.source_daily(nodes)
         require(len(blacklist) <= MAX_BANS, "待迁黑名单条目超过大小限制")
         packet = encode_json({"format": FORMAT, "origin": host.identity(), "profile": profile,
-                              "nodes": [asdict(node) for node in nodes], "blacklist": sorted(blacklist)})
+                              "nodes": [asdict(node) for node in nodes], "blacklist": sorted(blacklist), "daily": daily})
         require(len(packet) <= MAX_PACKET and len(nodes) <= 512, "节点数量或迁移包超过限制")
         return packet
 
@@ -1105,7 +1363,7 @@ def journal_write(tx):
 def journal_read():
     data = decode_json(secure_read(JOURNAL, MAX_PACKET * 2))
     fields = {"format", "fence", "phase", "new", "old", "defaults", "main_subscription"}
-    require(isinstance(data, dict) and set(data) - {"blacklist"} == fields
+    require(isinstance(data, dict) and set(data) - {"blacklist", "daily"} == fields
             and data["format"] == FORMAT and isinstance(data["fence"], str) and FENCE.fullmatch(data["fence"])
             and data["phase"] in {"prepare", "restore", "rollback_done", "publish"}
             and isinstance(data["old"], list) and isinstance(data["new"], list), "恢复文件格式不支持")
@@ -1123,6 +1381,8 @@ def journal_read():
         base64.b64decode(data[key], validate=True)
     if "blacklist" in data:
         ban_plan_state(data["blacklist"], {node.port for node in new})
+    if "daily" in data:
+        validate_daily_plan(data["daily"], new, [node for _, node in old])
     return data
 
 
@@ -1139,10 +1399,13 @@ def transaction_files(nodes):
     return paths
 
 
-def clean_pending(nodes, table, *, blacklist=False):
+def clean_pending(nodes, table, *, blacklist=False, daily=None):
     paths = transaction_files(nodes) | {permit_file(table)}
     if blacklist:
         paths.update(blacklist_files())
+    if daily is not None:
+        paths.update(daily_files() if daily["install"] else {daily_path()})
+        paths.update(guard_file(unit) for unit in daily_guard_units(daily))
     for path in paths:
         temporary = pending_file(path)
         if exists(temporary):
@@ -1176,11 +1439,13 @@ def restore_target(host, tx, *, recovering=False):
     ports = {node.port for node in new}
     units = {node.unit for node in new + old}
     blacklist = tx.get("blacklist")
-    clean_pending(new + old, tx["fence"], blacklist=blacklist is not None)
+    daily = tx.get("daily")
+    guarded = units | daily_guard_units(daily)
+    clean_pending(new + old, tx["fence"], blacklist=blacklist is not None, daily=daily)
     if tx["phase"] == "restore":
         if tx["fence"] not in host.tables():
             host.fence(tx["fence"], ports)
-        host.guard_units(tx["fence"], units)
+        host.guard_units(tx["fence"], guarded)
         stop_defined(host, units)
         require(not host.listeners(ports), "恢复时端口已被外部服务占用")
         for node in new:
@@ -1196,6 +1461,8 @@ def restore_target(host, tx, *, recovering=False):
             write_file(MAIN_SUB, base64.b64decode(tx["main_subscription"], validate=True))
             for record, node in backup:
                 host.restore_ip_slots(node, record["slots"])
+        if daily is not None:
+            host.restore_daily(daily)
         host.sys("daemon-reload")
         for record, node in backup:
             host.sys("enable" if record["enabled"] else "disable", node.unit)
@@ -1214,16 +1481,17 @@ def restore_target(host, tx, *, recovering=False):
             host.sys("start", *(node.unit for node in active), timeout=150)
         host.wait_ready(active)
         host.refresh_subscription()
-    host.clear_guards(tx["fence"], units)
+    host.clear_guards(tx["fence"], guarded)
     host.unfence(tx["fence"])
     remove_file(JOURNAL)
 
 
 def publish_target(host, tx, *, recovering=False):
     nodes, old = transaction_nodes(tx)
+    daily = tx.get("daily")
     if recovering:
         blacklist = tx.get("blacklist")
-        clean_pending(nodes + [node for _, node in old], tx["fence"], blacklist=blacklist is not None)
+        clean_pending(nodes + [node for _, node in old], tx["fence"], blacklist=blacklist is not None, daily=daily)
         if blacklist is not None:
             host.verify_blacklist(blacklist, {node.port for node in nodes})
         live = [node for node in nodes if not expired(node)]
@@ -1235,13 +1503,16 @@ def publish_target(host, tx, *, recovering=False):
                 host.policy_state(node)
         host.refresh_subscription()
         host.legacy(remove=True)
-    host.clear_guards(tx["fence"], {node.unit for node in nodes} | {node.unit for _, node in old})
+    guarded = {node.unit for node in nodes} | {node.unit for _, node in old} | daily_guard_units(daily)
+    host.clear_guards(tx["fence"], guarded)
+    if daily is not None:
+        host.finish_daily(daily)
     host.unfence(tx["fence"])
     remove_file(JOURNAL)
 
 
 def apply_bundle(host, packet):
-    origin, profile, all_incoming, all_bans = decode_bundle(packet)
+    origin, profile, all_incoming, all_bans, daily = decode_bundle(packet)
     with host.temp_lock(), (host.blacklist_lock() if all_bans else contextlib.nullcontext()):
         require(not exists(JOURNAL) and not exists(pending_file(Path(JOURNAL))),
                 "目标机还有未完成的接管，请先运行 recover")
@@ -1257,6 +1528,7 @@ def apply_bundle(host, packet):
         nodes, conflicts = plan_nodes(incoming, current)
         ports = {node.port for node in nodes}
         requested_bans = {entry for entry in all_bans if entry[0] in ports}
+        daily_plan = host.prepare_daily(daily, incoming, nodes) if daily is not None else None
         for node in nodes:
             if node.main:
                 version = current[443].meta.get("XRAY_VERSION")
@@ -1292,6 +1564,8 @@ def apply_bundle(host, packet):
                 require((not exists(path.parent) if is_guard else path.parent.is_dir())
                         and path.resolve() == path and not exists(pending_file(path)),
                         f"目标路径异常或有未归属的临时文件 {path}")
+            for unit in daily_guard_units(daily_plan):
+                require(not exists(guard_file(unit).parent), f"目标统计服务已有未知保护 {unit}")
             old_subscription = secure_read(MAIN_SUB)
             old_defaults = secure_read(MAIN_DEFAULTS)
             new_defaults = main_defaults(old_defaults, next(node.meta for node in nodes if node.main))
@@ -1304,10 +1578,12 @@ def apply_bundle(host, packet):
                   main_subscription=base64.b64encode(old_subscription).decode())
         if blacklist is not None:
             tx["blacklist"] = blacklist
+        if daily_plan is not None:
+            tx["daily"] = daily_plan
         journal_write(tx)
         try:
             host.fence(tx["fence"], ports)
-            host.guard_units(tx["fence"], {node.unit for node in nodes + old})
+            host.guard_units(tx["fence"], {node.unit for node in nodes + old} | daily_guard_units(daily_plan))
             with host.policy_lock():
                 # The scoped fence prevents an old target quota moving after this snapshot.
                 for record, entry in zip(backup, old, strict=True):
@@ -1315,6 +1591,8 @@ def apply_bundle(host, packet):
                     host.capture_quota(node)
                     record["slots"] = host.capture_ip_slots(node)
                     record["node"] = asdict(node)
+                if daily_plan is not None:
+                    host.capture_daily_before(daily_plan, old)
                 tx["phase"] = "restore"
                 journal_write(tx)
 
@@ -1333,6 +1611,8 @@ def apply_bundle(host, packet):
             if blacklist is not None:
                 host.apply_blacklist(blacklist, ports)
                 host.verify_blacklist(blacklist, ports)
+            if daily_plan is not None:
+                host.apply_daily(daily_plan)
             host.sys("daemon-reload")
             host.sys("enable", *(node.unit for node in nodes), timeout=100)
             host.permit_units(tx["fence"])
@@ -1363,6 +1643,8 @@ def apply_bundle(host, packet):
         print(f"目标已接管 443，替换 {len(old) - 1} 个临时节点，新增 {len(nodes) - len(old)} 个临时节点。", flush=True)
         if requested_bans:
             print(f"已接续 {len(requested_bans)} 条源机黑名单。", flush=True)
+        if daily_plan is not None:
+            print(f"已接续 {len(daily_plan['incoming'])} 个节点的每日流量历史（最近 30 天）。", flush=True)
 
 
 def recover_target(host):
