@@ -409,12 +409,44 @@ class TransactionTests(unittest.TestCase):
                 return SimpleNamespace(returncode=2, stdout="", stderr="RTNETLINK answers: Network is unreachable\n")
             return original_run(*args, **kwargs)
 
-        with patch.object(self.host, "run", side_effect=fail_route), \
+        with patch.object(self.host, "run", side_effect=fail_route) as run, \
+                patch.object(q.time, "sleep") as retry_sleep, \
                 self.assertRaisesRegex(q.MigrationError, "mark=8080.*Network is unreachable.*尚未替换目标节点"):
             q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40000, nat=True)]))
+        self.assertEqual(sum(call.args[0] == "ip" for call in run.call_args_list), 5)
+        self.assertEqual(retry_sleep.call_count, 4)
         self.assertEqual(self.current(443).url, self.main.url)
         self.assertEqual(self.current(40000).url, self.old.url)
         self.assertEqual(self.host.actions, [])
+        self.assert_clean()
+
+    def test_nat_route_refresh_is_retried_without_changing_target(self):
+        original_run = self.host.run
+        failures = [
+            SimpleNamespace(returncode=2, stdout="", stderr="RTNETLINK answers: Network is unreachable"),
+            SimpleNamespace(returncode=0, stdout='[{"dev":"eth0"}]', stderr=""),
+        ]
+        for initial in failures:
+            with self.subTest(initial=initial):
+                calls = []
+
+                def refreshing_route(*args, **kwargs):
+                    if args[0] == "ip":
+                        calls.append(args)
+                        if len(calls) == 1:
+                            return initial
+                    return original_run(*args, **kwargs)
+
+                incoming = node("vless-temp-new", 40000, nat=True)
+                with patch.object(self.host, "run", side_effect=refreshing_route), \
+                        patch.object(q.time, "sleep") as retry_sleep:
+                    self.host.adapt_nat(incoming)
+                self.assertEqual(len(calls), 2)
+                retry_sleep.assert_called_once_with(0.5)
+                self.assertEqual(incoming.meta["MARK"], "8080")
+                self.assertEqual(incoming.config["outbounds"][0]["streamSettings"]["sockopt"]["mark"], 8080)
+        self.assertEqual(self.host.actions, [])
+        self.assertEqual(self.current(40000).url, self.old.url)
         self.assert_clean()
 
     def test_failed_start_restores_previous_main_limits_and_ip_slots(self):

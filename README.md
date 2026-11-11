@@ -6,7 +6,7 @@
 
 - 两台 VPS 均须已有标准的 `jieshu` 443 主节点、相同版本的 `jieshu` 管理库、Python 3.10+、systemd、nftables、`ss` 和 `curl`。两台 VPS 直接传输时，源机还需要 OpenSSL。
 - Windows 一键方式需要能用同一个私钥从 Windows 登录两台 VPS，并已核对两台的 SSH 主机指纹。两台 VPS 直接传输方式则使用目标机到源机的 root SSH 和 TCP 本地转发。
-- WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，迁入节点改用目标机的 mark、路由表和优先级。
+- WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，路由短暂刷新时自动重试，持续异常则停止迁移。迁入节点改用目标机的 mark、路由表和优先级。
 - 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
 - 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
 - 源机已安装 `vless_traffic` 时，导出前会采集一次，将 443 和迁入临时节点最近 30 个北京时间自然日的每日流量一同带走。目标机会用自己的计数器继续累计，并保留其他节点的历史。目标机缺少该组件时，工具会自动安装经过版本校验的原生统计程序。
@@ -25,7 +25,7 @@
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
         $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
-        if ($hash -ne 'b6402be10d8f73a16d8201c99c2d27474ae2c87800cd095744bbf74b188c27f5') {
+        if ($hash -ne '39423302b23ac24170c04acf13811c931d3e38555169c84636a74519356cacf0') {
             throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
         }
     }
@@ -59,7 +59,7 @@ Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' 'b1531787566de709d73fb1aa037d29d407fb3ba8dea7117a8614464734542213' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' 'ffc1249ccb025ab59515a9aab613c59a09583d488521385479efaa67e6dfce55' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```
