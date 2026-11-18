@@ -28,6 +28,7 @@ import sys
 import time
 from types import ModuleType
 from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.request import urlopen
 from uuid import UUID
 
 
@@ -54,6 +55,7 @@ MAIN_DEFAULTS = "/etc/default/vless-reality"
 JOURNAL = f"{STATE}/.qianyi-recovery.json"
 TRAFFIC_PROGRAM = "/usr/local/sbin/vless_traffic"
 TRAFFIC_SHA256 = "8aba583afe39c5c8ad21efa6c4b2616ef4f47080d5810484a194b3ea5979af49"
+TRAFFIC_URL = "https://raw.githubusercontent.com/liucong552-art/jieshu/3e1972393cd9e6f097b27b76f919a649def61ae4/traffic.py"
 TRAFFIC_TABLE = "vr_daily_traffic"
 TRAFFIC_UNITS = {
     "vless-traffic.service": """[Unit]
@@ -933,15 +935,19 @@ source {LIB}/iplimit-lib.sh
     def prepare_blacklist(self, requested):
         state_path, unit_path = blacklist_files()
         active = self.active_cidrs()
-        require(active is not None and exists(state_path) and exists(unit_path),
-                "源快照含手工黑名单，目标机需预先部署并加载原生 jsh-cidrban.service")
-        previous = secure_read(state_path)
-        require(cidr_entries(previous.decode("utf-8")) == active, "目标黑名单运行规则与持久配置不一致")
-        require(normalized_unit(secure_read(unit_path).decode()) == normalized_unit(CIDR_UNIT_TEXT)
-                and self.property(CIDR_UNIT, "FragmentPath") == str(unit_path)
-                and not self.property(CIDR_UNIT, "DropInPaths") and self.enabled(CIDR_UNIT),
-                "目标黑名单恢复服务不是标准且已启用的 jieshu 服务")
-        additions = requested - active
+        previous = secure_read(state_path) if exists(state_path) else None
+        if active is None:
+            require(previous is None and not exists(unit_path)
+                    and self.property(CIDR_UNIT, "LoadState") == "not-found",
+                    "目标黑名单有持久配置但未加载，请先检查 jsh-cidrban.service")
+        else:
+            require(previous is not None and cidr_entries(previous.decode("utf-8")) == active
+                    and exists(unit_path), "目标黑名单运行规则与持久配置不一致")
+            require(normalized_unit(secure_read(unit_path).decode()) == normalized_unit(CIDR_UNIT_TEXT)
+                    and self.property(CIDR_UNIT, "FragmentPath") == str(unit_path)
+                    and not self.property(CIDR_UNIT, "DropInPaths") and self.enabled(CIDR_UNIT),
+                    "目标黑名单恢复服务不是标准且已启用的 jieshu 服务")
+        additions = requested - (active or set())
         if not additions:
             return None
         for path in (state_path, unit_path):
@@ -956,14 +962,23 @@ source {LIB}/iplimit-lib.sh
         conflicts = udp_ports & {port for port, _ in additions}
         require(not conflicts, f"目标机有 UDP 服务占用黑名单端口 {sorted(conflicts)}")
         extend_cidr_state(previous, additions)
-        return {"previous": base64.b64encode(previous).decode(),
+        return {"previous": None if previous is None else base64.b64encode(previous).decode(),
                 "entries": [list(entry) for entry in sorted(additions)]}
 
     def apply_blacklist(self, plan, ports):
         previous, _, additions = ban_plan_state(plan, ports)
-        require(previous is not None, "目标机缺少已部署的原生 CIDR 黑名单")
-        self.nft("\n".join(f"add rule inet {CIDR_TABLE} pre {cidr_rule(*entry)}" for entry in sorted(additions)))
-        write_file(CIDR_STATE, extend_cidr_state(previous, additions))
+        state_path, unit_path = blacklist_files()
+        commands = []
+        if previous is None:
+            commands += [f"create table inet {CIDR_TABLE}",
+                         f"add chain inet {CIDR_TABLE} pre {{ type filter hook prerouting priority -150; policy accept; }}"]
+        commands += [f"add rule inet {CIDR_TABLE} pre {cidr_rule(*entry)}" for entry in sorted(additions)]
+        self.nft("\n".join(commands))
+        write_file(state_path, extend_cidr_state(previous, additions))
+        if previous is None:
+            write_file(unit_path, CIDR_UNIT_TEXT.encode(), 0o644)
+            self.sys("daemon-reload")
+            self.sys("enable", CIDR_UNIT)
 
     def verify_blacklist(self, plan, ports):
         _, before, additions = ban_plan_state(plan, ports)
@@ -981,7 +996,6 @@ source {LIB}/iplimit-lib.sh
                 "黑名单持久配置在迁移期间被改动，保留原文件")
         active = self.active_cidrs()
         if previous is None:
-            # Older releases could install the target's native blacklist service.
             if active is not None:
                 require(active <= additions, "黑名单表出现外部改动，保留现有规则")
                 self.nft(f"delete table inet {CIDR_TABLE}")
@@ -1197,12 +1211,27 @@ fi""", node.port, "main" if node.main else "temp", node.family)
         return payload
 
     def prepare_daily(self, daily, incoming, nodes):
-        require(exists(TRAFFIC_PROGRAM), "源快照含每日流量历史，目标机需预先部署匹配版本的 vless_traffic")
-        program = secure_read(TRAFFIC_PROGRAM)
+        installed = exists(TRAFFIC_PROGRAM)
+        if installed:
+            program = secure_read(TRAFFIC_PROGRAM)
+        else:
+            require(not exists(daily_path()) and TRAFFIC_TABLE not in self.tables(),
+                    "目标机有每日流量残留但缺少原生统计程序，请先检查")
+            for name in TRAFFIC_UNITS:
+                path = Path(SYSTEMD) / name
+                require(not exists(path) and not exists(path.parent / f"{name}.d")
+                        and self.property(name, "LoadState") == "not-found",
+                        f"目标机已有无法归属的每日流量服务 {name}")
+            try:
+                with urlopen(TRAFFIC_URL, timeout=25) as response:
+                    program = response.read(MAX_STATE_FILE + 1)
+            except OSError:
+                raise MigrationError("目标机下载原生每日流量组件失败，请检查 GitHub 网络") from None
         self.daily_module(program)
-        path = daily_path()
-        require(path.resolve() == path and not exists(pending_file(path)),
-                f"每日流量路径异常或有未完成写入 {path}")
+        paths = daily_files() if not installed else {daily_path()}
+        for path in paths:
+            require(path.resolve() == path and not exists(pending_file(path)),
+                    f"每日流量路径异常或有未完成写入 {path}")
         records = {}
         for original, node in zip(incoming, nodes, strict=True):
             if original.tag in daily["users"]:
@@ -1210,7 +1239,7 @@ fi""", node.port, "main" if node.main else "temp", node.family)
                 record.update(tag=node.tag, port=node.port, key=daily_key(node))
                 records[node.tag] = record
         validate_daily_records(records, nodes)
-        return {"install": False, "directory_created": False,
+        return {"install": not installed, "directory_created": not daily_path().parent.exists(),
                 "program": base64.b64encode(program).decode(), "incoming": records, "before": {}}
 
     def capture_daily_before(self, plan, old):
@@ -1237,6 +1266,10 @@ fi""", node.port, "main" if node.main else "temp", node.family)
         module.save_state(daily_path(), state)
 
     def apply_daily(self, plan):
+        if plan["install"]:
+            write_file(TRAFFIC_PROGRAM, base64.b64decode(plan["program"], validate=True), 0o755)
+            for name, content in TRAFFIC_UNITS.items():
+                write_file(Path(SYSTEMD) / name, content.encode(), 0o644)
         self.merge_daily(plan, plan["incoming"])
         self.verify_daily(plan)
 
@@ -1260,7 +1293,6 @@ fi""", node.port, "main" if node.main else "temp", node.family)
 
     def finish_daily(self, plan):
         self.verify_daily(plan)
-        # Complete older, already-committed transactions that installed traffic units.
         if plan["install"]:
             for name, content in TRAFFIC_UNITS.items():
                 require(secure_read(Path(SYSTEMD) / name) == content.encode(), "每日流量服务归属异常")
