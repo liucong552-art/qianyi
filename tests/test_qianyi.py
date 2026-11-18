@@ -516,23 +516,29 @@ class TransactionTests(unittest.TestCase):
     def test_migration_merges_bans_and_keeps_other_ports(self):
         old = {(40000, "203.0.113.5/32"), (40001, "192.0.2.0/24")}
         previous = self.setup_cidr_rules(old)
+        unit = q.blacklist_files()[1]
+        original_unit = unit.read_bytes(), unit.stat().st_mtime_ns
         new = {(40000, "198.51.100.2/32")}
         q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40000)],
                                          blacklist={(40000, "203.0.113.5/32")} | new))
         self.assertEqual(self.host.cidr_rules, old | new)
         saved = Path(q.CIDR_STATE).read_bytes()
         self.assertEqual(saved, q.extend_cidr_state(previous, new))
+        self.assertEqual((unit.read_bytes(), unit.stat().st_mtime_ns), original_unit)
         self.assertTrue(self.host.enabled(q.CIDR_UNIT))
         self.assert_clean()
 
-    def test_migration_adds_native_service_on_previously_empty_target(self):
+    def test_missing_native_cidr_service_refuses_before_replacing_services(self):
         ban = (40024, "198.51.100.2/32")
         self.host.legacy_rules = {(40001, "192.0.2.3/32")}
-        q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40024)], blacklist=[ban]))
-        self.assertEqual(self.host.cidr_rules, {ban})
-        self.assertEqual(q.cidr_entries(Path(q.CIDR_STATE).read_text()), {ban})
+        with self.assertRaisesRegex(q.MigrationError, "预先部署并加载原生 jsh-cidrban"):
+            q.apply_bundle(self.host, packet([node("main", 443), node("vless-temp-new", 40024)], blacklist=[ban]))
+        self.assertEqual(self.current(443).url, self.main.url)
+        self.assertNotIn(40024, self.host.inventory())
+        self.assertIsNone(self.host.cidr_rules)
+        self.assertFalse(any(path.exists() for path in q.blacklist_files()))
         self.assertEqual(self.host.legacy_rules, {(40001, "192.0.2.3/32")})
-        self.assertTrue(self.host.enabled(q.CIDR_UNIT))
+        self.assertFalse(self.host.enabled(q.CIDR_UNIT))
         self.assert_clean()
 
     def test_rollback_restores_previous_blacklist_and_removes_only_added_entries(self):
@@ -548,11 +554,11 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(self.host.enabled(q.CIDR_UNIT))
         self.assert_clean()
 
-    def test_rollback_cleans_new_blacklist_service_and_table(self):
-        new = node("vless-temp-new", 40024)
-        self.host.fail_start = new.unit
-        with self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
-            q.apply_bundle(self.host, packet([node("main", 443), new], blacklist=[(40024, "198.51.100.2/32")]))
+    def test_legacy_blacklist_rollback_cleans_service_installed_by_previous_version(self):
+        ban = (40024, "198.51.100.2/32")
+        self.setup_cidr_rules({ban})
+        q.blacklist_files()[1].write_bytes(q.CIDR_UNIT_TEXT.encode())
+        self.host.restore_blacklist({"previous": None, "entries": [list(ban)]}, {40024})
         self.assertIsNone(self.host.cidr_rules)
         self.assertFalse(any(path.exists() for path in q.blacklist_files()))
         self.assertFalse(self.host.enabled(q.CIDR_UNIT))
@@ -597,21 +603,24 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.daily_counts(self.keep.tag), {"upload": 503, "download": 604})
         self.assert_clean()
 
-    def test_daily_component_is_installed_when_the_target_does_not_have_it(self):
+    def test_missing_target_daily_component_refuses_before_replacing_services(self):
         nodes = [node("main", 443), node("vless-temp-new", 40000)]
-        with patch.object(q, "urlopen", return_value=BytesIO(DAILY_PROGRAM)):
+        active_units = set(self.host.active_units)
+        with self.assertRaisesRegex(q.MigrationError, "预先部署匹配版本的 vless_traffic"):
             q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
-        self.assertEqual(Path(q.TRAFFIC_PROGRAM).read_bytes(), DAILY_PROGRAM)
-        self.assertEqual(self.daily_counts(nodes[1].tag), {"upload": 1000, "download": 2000})
-        self.assertTrue(all(self.host.active(unit) and self.host.enabled(unit) for unit in q.TRAFFIC_ENABLED))
+        self.assertEqual(self.current(443).url, self.main.url)
+        self.assertEqual(self.current(40000).url, self.old.url)
+        self.assertEqual(self.host.active_units, active_units)
+        self.assertFalse(any(path.exists() for path in q.daily_files()))
         self.assert_clean()
 
-    def test_failed_install_removes_new_daily_component_and_its_files(self):
-        nodes = [node("main", 443), node("vless-temp-new", 40000)]
-        self.host.fail_start = nodes[1].unit
-        with patch.object(q, "urlopen", return_value=BytesIO(DAILY_PROGRAM)), \
-                self.assertRaisesRegex(q.MigrationError, "simulated start failure"):
-            q.apply_bundle(self.host, packet(nodes, daily=daily_payload(nodes)))
+    def test_legacy_daily_rollback_removes_component_installed_by_previous_version(self):
+        self.setup_daily()
+        for name, content in q.TRAFFIC_UNITS.items():
+            (Path(q.SYSTEMD) / name).write_bytes(content.encode())
+        self.host.active_units.difference_update(q.TRAFFIC_ENABLED)
+        plan = {"install": True, "directory_created": True}
+        self.host.restore_daily(plan)
         self.assertFalse(any(path.exists() for path in q.daily_files()))
         self.assertFalse(q.daily_path().parent.exists())
         self.assertFalse(self.host.daily_kernel.exists)

@@ -8,8 +8,8 @@
 - Windows 一键方式需要能用同一个私钥从 Windows 登录两台 VPS，并已核对两台的 SSH 主机指纹。两台 VPS 直接传输方式则使用目标机到源机的 root SSH 和 TCP 本地转发。
 - WG-NAT 节点使用目标机已有的同名 WireGuard 接口。预检会检查其标记路由和最近握手，路由短暂刷新时自动重试，持续异常则停止迁移。迁入节点改用目标机的 mark、路由表和优先级。
 - 迁入端口若被其他服务占用，或有无法归属的文件、自定义 systemd 单元、独立的 portbw 或暂停策略，程序会在替换前停止。
-- 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表，使用目标机的标准 CIDR 表持久保存，并保留目标机原有封禁。
-- 源机已安装 `vless_traffic` 时，导出前会采集一次，将 443 和迁入临时节点最近 30 个北京时间自然日的每日流量一同带走。目标机会用自己的计数器继续累计，并保留其他节点的历史。目标机缺少该组件时，工具会自动安装经过版本校验的原生统计程序。
+- 源机迁入端口的标准 `jieshu` IPv4 黑名单随节点迁移。工具识别新版 CIDR 表和旧版单 IP 表。源有待迁黑名单时，目标须已启用 `jieshu` 原生 CIDR 黑名单服务。迁移使用该服务的持久配置，并保留目标机原有封禁。
+- 源机已安装 `vless_traffic` 时，导出前会采集一次，将 443 和迁入临时节点最近 30 个北京时间自然日的每日流量一同带走。此时目标须提前通过 `jieshu` 的原生流程安装匹配版本的统计组件。目标会用自己的计数器继续累计，并保留其他节点的历史。缺少组件时，预检会在替换业务前停止。
 
 ## Windows 一键迁移
 
@@ -25,7 +25,7 @@
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = $client.DownloadData('https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.ps1')
         $hash = ([BitConverter]::ToString($sha256.ComputeHash($body))).Replace('-', '').ToLowerInvariant()
-        if ($hash -ne '39423302b23ac24170c04acf13811c931d3e38555169c84636a74519356cacf0') {
+        if ($hash -ne '1f8dd6fcca51b9f493ee2e310a86a061155c41c40e5d18b90039d1792c49a1f9') {
             throw '启动脚本校验失败，请重新打开 GitHub README 并复制最新命令。'
         }
     }
@@ -59,7 +59,7 @@ Windows 会用已有私钥分别登录两台 VPS，通过 SSH 把快照从源机
   trap 'exit 129' HUP
   curl --proto '=https' -fsSL --max-time 90 \
     https://raw.githubusercontent.com/liucong552-art/qianyi/main/qianyi.py -o "$d/qianyi.py"
-  printf '%s  %s\n' 'ffc1249ccb025ab59515a9aab613c59a09583d488521385479efaa67e6dfce55' "$d/qianyi.py" | sha256sum -c -
+  printf '%s  %s\n' 'bb084d3b9bf1e07c0225f6ec89c9d3a1d74604903687ea24fa244cba9be485b0' "$d/qianyi.py" | sha256sum -c -
   python3 -I -B "$d/qianyi.py" send
 )
 ```
